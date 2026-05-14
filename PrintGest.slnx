@@ -1,7 +1,0 @@
-<Solution>
-  <Project Path="PrintGest.Api/PrintGest.Api.csproj" />
-  <Project Path="PrintGest.Application/PrintGest.Application.csproj" />
-  <Project Path="PrintGest.Domain/PrintGest.Domain.csproj" />
-  <Project Path="PrintGest.Infrastructure/PrintGest.Infrastructure.csproj" />
-  <Project Path="PrintGest.Tests/PrintGest.Tests.csproj" />
-</Solution>
