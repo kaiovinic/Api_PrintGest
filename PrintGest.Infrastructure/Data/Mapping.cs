@@ -3,7 +3,7 @@ using PrintGest.Domain.Enums;
 
 namespace PrintGest.Infrastructure.Data;
 
-internal static class Mapping
+public static class Mapping
 {
     public static PerfilUsuario Perfil(string value)
     {

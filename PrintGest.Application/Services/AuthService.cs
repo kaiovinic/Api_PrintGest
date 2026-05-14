@@ -1,6 +1,8 @@
 using PrintGest.Application.Abstractions;
 using PrintGest.Application.Contracts.Auth;
 using PrintGest.Domain.Enums;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace PrintGest.Application.Services;
 
@@ -33,9 +35,20 @@ public sealed class AuthService(IUsuarioRepository usuarios) : IAuthService
             $"local-dev-token-{usuario.Id}");
     }
 
-    private static bool SenhaValida(string senha, string senhaHash)
+    public static bool SenhaValida(string senha, string senhaHash)
     {
-        return senha == "123456789"
-            && (senhaHash == "HASH_DA_SENHA_123456789" || senhaHash == "123456789");
+        if (senha == "123456789"
+            && (senhaHash == "HASH_DA_SENHA_123456789" || senhaHash == "123456789"))
+        {
+            return true;
+        }
+
+        return senhaHash == GerarHashLocal(senha);
+    }
+
+    public static string GerarHashLocal(string senha)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(senha));
+        return $"SHA256:{Convert.ToHexString(bytes)}";
     }
 }
