@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using MySqlConnector;
 using PrintGest.Application.Abstractions;
 using PrintGest.Infrastructure.Data;
 
@@ -31,6 +32,11 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
                    p.numero,
                    p.cliente_id,
                    c.nome AS cliente,
+                   c.empresa,
+                   c.cpf_cnpj,
+                   c.telefone,
+                   c.endereco,
+                   c.cidade,
                    p.criado_por_usuario_id,
                    p.tipo,
                    p.status,
@@ -61,12 +67,17 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         }
 
         var dataEntregaOrdinal = reader.GetOrdinal("data_entrega");
-        return Ok(new
+        var detalhe = new
         {
             Id = reader.GetInt64("id"),
             Numero = reader.GetString("numero"),
             ClienteId = reader.GetInt64("cliente_id"),
             Cliente = reader.GetString("cliente"),
+            Empresa = reader.NullableString("empresa"),
+            CpfCnpj = reader.NullableString("cpf_cnpj"),
+            Telefone = reader.NullableString("telefone"),
+            Endereco = reader.NullableString("endereco"),
+            Cidade = reader.NullableString("cidade"),
             UsuarioId = reader.GetInt64("criado_por_usuario_id"),
             Tipo = reader.GetString("tipo"),
             Status = reader.GetString("status"),
@@ -82,8 +93,11 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
             Observacao = reader.NullableString("observacao"),
             Total = reader.GetDecimal("total"),
             ValorPago = reader.GetDecimal("valor_pago"),
-            SaldoDevedor = reader.GetDecimal("saldo_devedor")
-        });
+            SaldoDevedor = reader.GetDecimal("saldo_devedor"),
+            Itens = await ListarItensPedido(id, cancellationToken)
+        };
+
+        return Ok(detalhe);
     }
 
     [HttpPost("orcamentos")]
@@ -105,7 +119,9 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
     {
         await using var connection = factory.Create();
         await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             UPDATE pedidos
             SET data_pedido = @dataPedido,
@@ -125,7 +141,16 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
             """;
         command.Parameters.AddWithValue("@id", id);
         PreencherParametrosPedido(command, request);
-        return await command.ExecuteNonQueryAsync(cancellationToken) == 0 ? NotFound() : NoContent();
+        if (await command.ExecuteNonQueryAsync(cancellationToken) == 0)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return NotFound();
+        }
+
+        await AtualizarCliente(connection, transaction, request, cancellationToken);
+        await SubstituirItensPedido(connection, transaction, id, request.Itens, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return NoContent();
     }
 
     [HttpPut("{id:long}")]
@@ -133,7 +158,9 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
     {
         await using var connection = factory.Create();
         await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             UPDATE pedidos
             SET tipo = 'PEDIDO',
@@ -157,7 +184,16 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         command.Parameters.AddWithValue("@id", id);
         command.Parameters.AddWithValue("@valorPago", request.ValorPago);
         PreencherParametrosPedido(command, request);
-        return await command.ExecuteNonQueryAsync(cancellationToken) == 0 ? NotFound() : NoContent();
+        if (await command.ExecuteNonQueryAsync(cancellationToken) == 0)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return NotFound();
+        }
+
+        await AtualizarCliente(connection, transaction, request, cancellationToken);
+        await SubstituirItensPedido(connection, transaction, id, request.Itens, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return NoContent();
     }
 
     [HttpPatch("{id:long}/converter-em-pedido")]
@@ -224,7 +260,11 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
     {
         await using var connection = factory.Create();
         await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var clienteId = await SalvarCliente(connection, transaction, request, cancellationToken);
+
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO pedidos
                 (numero, cliente_id, criado_por_usuario_id, tipo, status, data_pedido, data_entrega,
@@ -240,8 +280,12 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         command.Parameters.AddWithValue("@status", status);
         command.Parameters.AddWithValue("@valorPago", request.ValorPago);
         command.Parameters.AddWithValue("@saldoDevedor", request.Total - request.ValorPago);
-        PreencherParametrosPedido(command, request);
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+        PreencherParametrosPedido(command, request, clienteId);
+        var id = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+
+        await SubstituirItensPedido(connection, transaction, id, request.Itens, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return id;
     }
 
     private async Task<IActionResult> AlterarStatus(long id, string status, long usuarioId, string? observacao, CancellationToken cancellationToken)
@@ -266,10 +310,10 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         return await command.ExecuteNonQueryAsync(cancellationToken) == 0 ? NotFound() : NoContent();
     }
 
-    private static void PreencherParametrosPedido(System.Data.Common.DbCommand command, PedidoRequest request)
+    private static void PreencherParametrosPedido(System.Data.Common.DbCommand command, PedidoRequest request, long? clienteId = null)
     {
         command.Parameters.Add(new MySqlConnector.MySqlParameter("@numero", request.Numero));
-        command.Parameters.Add(new MySqlConnector.MySqlParameter("@clienteId", request.ClienteId));
+        command.Parameters.Add(new MySqlConnector.MySqlParameter("@clienteId", clienteId ?? request.ClienteId));
         command.Parameters.Add(new MySqlConnector.MySqlParameter("@usuarioId", request.UsuarioId));
         command.Parameters.Add(new MySqlConnector.MySqlParameter("@dataPedido", request.DataPedido.ToDateTime(TimeOnly.MinValue)));
         command.Parameters.Add(new MySqlConnector.MySqlParameter("@dataEntrega", request.DataEntrega?.ToDateTime(TimeOnly.MinValue)));
@@ -282,6 +326,129 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         command.Parameters.Add(new MySqlConnector.MySqlParameter("@tamanhosFemininos", request.TamanhosFemininos));
         command.Parameters.Add(new MySqlConnector.MySqlParameter("@observacao", request.Observacao));
         command.Parameters.Add(new MySqlConnector.MySqlParameter("@total", request.Total));
+    }
+
+    private async Task<long> SalvarCliente(
+        MySqlConnection connection,
+        MySqlTransaction transaction,
+        PedidoRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.ClienteId > 0)
+        {
+            await AtualizarCliente(connection, transaction, request, cancellationToken);
+            return request.ClienteId;
+        }
+
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO clientes (nome, empresa, cpf_cnpj, telefone, endereco, cidade)
+            VALUES (@nome, @empresa, @cpfCnpj, @telefone, @endereco, @cidade);
+            SELECT LAST_INSERT_ID();
+            """;
+        command.Parameters.AddWithValue("@nome", request.ClienteNome);
+        command.Parameters.AddWithValue("@empresa", ToDb(request.Empresa));
+        command.Parameters.AddWithValue("@cpfCnpj", ToDb(request.CpfCnpj));
+        command.Parameters.AddWithValue("@telefone", ToDb(request.Telefone));
+        command.Parameters.AddWithValue("@endereco", ToDb(request.Endereco));
+        command.Parameters.AddWithValue("@cidade", ToDb(request.Cidade));
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+    }
+
+    private async Task AtualizarCliente(
+        MySqlConnection connection,
+        MySqlTransaction transaction,
+        PedidoRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE clientes
+            SET nome = @nome,
+                empresa = @empresa,
+                cpf_cnpj = @cpfCnpj,
+                telefone = @telefone,
+                endereco = @endereco,
+                cidade = @cidade
+            WHERE id = @clienteId;
+            """;
+        command.Parameters.AddWithValue("@clienteId", request.ClienteId);
+        command.Parameters.AddWithValue("@nome", request.ClienteNome);
+        command.Parameters.AddWithValue("@empresa", ToDb(request.Empresa));
+        command.Parameters.AddWithValue("@cpfCnpj", ToDb(request.CpfCnpj));
+        command.Parameters.AddWithValue("@telefone", ToDb(request.Telefone));
+        command.Parameters.AddWithValue("@endereco", ToDb(request.Endereco));
+        command.Parameters.AddWithValue("@cidade", ToDb(request.Cidade));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private async Task SubstituirItensPedido(
+        MySqlConnection connection,
+        MySqlTransaction transaction,
+        long pedidoId,
+        IReadOnlyList<ItemPedidoRequest> itens,
+        CancellationToken cancellationToken)
+    {
+        await using var delete = connection.CreateCommand();
+        delete.Transaction = transaction;
+        delete.CommandText = "DELETE FROM itens_pedido WHERE pedido_id = @pedidoId;";
+        delete.Parameters.AddWithValue("@pedidoId", pedidoId);
+        await delete.ExecuteNonQueryAsync(cancellationToken);
+
+        foreach (var item in itens.Where(item => !string.IsNullOrWhiteSpace(item.Descricao)))
+        {
+            await using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO itens_pedido (pedido_id, descricao, tamanho, quantidade, valor_unitario, valor_total)
+                VALUES (@pedidoId, @descricao, @tamanho, @quantidade, @valorUnitario, @valorTotal);
+                """;
+            insert.Parameters.AddWithValue("@pedidoId", pedidoId);
+            insert.Parameters.AddWithValue("@descricao", item.Descricao);
+            insert.Parameters.AddWithValue("@tamanho", ToDb(item.Tamanho));
+            insert.Parameters.AddWithValue("@quantidade", item.Quantidade);
+            insert.Parameters.AddWithValue("@valorUnitario", item.ValorUnitario);
+            insert.Parameters.AddWithValue("@valorTotal", item.ValorTotal);
+            await insert.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    private async Task<IReadOnlyList<object>> ListarItensPedido(long pedidoId, CancellationToken cancellationToken)
+    {
+        await using var connection = factory.Create();
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, descricao, tamanho, quantidade, valor_unitario, valor_total
+            FROM itens_pedido
+            WHERE pedido_id = @pedidoId
+            ORDER BY id;
+            """;
+        command.Parameters.AddWithValue("@pedidoId", pedidoId);
+
+        var itens = new List<object>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            itens.Add(new
+            {
+                Id = reader.GetInt64("id"),
+                Descricao = reader.GetString("descricao"),
+                Tamanho = reader.NullableString("tamanho"),
+                Quantidade = reader.GetInt32("quantidade"),
+                ValorUnitario = reader.GetDecimal("valor_unitario"),
+                ValorTotal = reader.GetDecimal("valor_total")
+            });
+        }
+
+        return itens;
+    }
+
+    private static object ToDb(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? DBNull.Value : value;
     }
 
     private static string? NormalizarFormaPagamento(string? formaPagamento)
@@ -314,6 +481,12 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
 public sealed record PedidoRequest(
     string Numero,
     long ClienteId,
+    string ClienteNome,
+    string? Empresa,
+    string? CpfCnpj,
+    string? Telefone,
+    string? Endereco,
+    string? Cidade,
     long UsuarioId,
     DateOnly DataPedido,
     DateOnly? DataEntrega,
@@ -326,7 +499,15 @@ public sealed record PedidoRequest(
     string? TamanhosFemininos,
     string? Observacao,
     decimal Total,
-    decimal ValorPago);
+    decimal ValorPago,
+    IReadOnlyList<ItemPedidoRequest> Itens);
+
+public sealed record ItemPedidoRequest(
+    string Descricao,
+    string? Tamanho,
+    int Quantidade,
+    decimal ValorUnitario,
+    decimal ValorTotal);
 
 public sealed record ConverterPedidoRequest(
     long UsuarioId,
