@@ -88,9 +88,8 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
             CondicaoPagamento = reader.NullableString("condicao_pagamento"),
             Frente = reader.NullableString("frente"),
             Fundo = reader.NullableString("fundo"),
-            TamanhosMasculinos = reader.NullableString("tamanhos_masculinos"),
-            TamanhosFemininos = reader.NullableString("tamanhos_femininos"),
             Observacao = reader.NullableString("observacao"),
+            OutrosItens = reader.NullableString("tamanhos_femininos"),
             Total = reader.GetDecimal("total"),
             ValorPago = reader.GetDecimal("valor_pago"),
             SaldoDevedor = reader.GetDecimal("saldo_devedor"),
@@ -322,8 +321,8 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         command.Parameters.Add(new MySqlConnector.MySqlParameter("@condicaoPagamento", NormalizarCondicaoPagamento(request.CondicaoPagamento)));
         command.Parameters.Add(new MySqlConnector.MySqlParameter("@frente", request.Frente));
         command.Parameters.Add(new MySqlConnector.MySqlParameter("@fundo", request.Fundo));
-        command.Parameters.Add(new MySqlConnector.MySqlParameter("@tamanhosMasculinos", request.TamanhosMasculinos));
-        command.Parameters.Add(new MySqlConnector.MySqlParameter("@tamanhosFemininos", request.TamanhosFemininos));
+        command.Parameters.Add(new MySqlConnector.MySqlParameter("@tamanhosMasculinos", DBNull.Value));
+        command.Parameters.Add(new MySqlConnector.MySqlParameter("@tamanhosFemininos", request.OutrosItens));
         command.Parameters.Add(new MySqlConnector.MySqlParameter("@observacao", request.Observacao));
         command.Parameters.Add(new MySqlConnector.MySqlParameter("@total", request.Total));
     }
@@ -495,9 +494,8 @@ public sealed record PedidoRequest(
     string? CondicaoPagamento,
     string? Frente,
     string? Fundo,
-    string? TamanhosMasculinos,
-    string? TamanhosFemininos,
     string? Observacao,
+    string? OutrosItens,
     decimal Total,
     decimal ValorPago,
     IReadOnlyList<ItemPedidoRequest> Itens);
