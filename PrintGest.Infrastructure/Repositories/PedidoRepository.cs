@@ -15,7 +15,8 @@ public sealed class PedidoRepository(MySqlConnectionFactory factory) : IPedidoRe
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT p.id, p.numero, c.nome AS cliente, p.tipo, p.status, p.data_pedido,
-                   p.data_entrega, p.total, p.valor_pago, p.saldo_devedor, u.nome AS criado_por
+                   p.data_entrega, p.total, p.valor_pago, p.saldo_devedor, u.nome AS criado_por,
+                   p.motivo_cancelamento
             FROM pedidos p
             INNER JOIN clientes c ON c.id = p.cliente_id
             INNER JOIN usuarios u ON u.id = p.criado_por_usuario_id
@@ -38,7 +39,8 @@ public sealed class PedidoRepository(MySqlConnectionFactory factory) : IPedidoRe
                 reader.GetDecimal("total"),
                 reader.GetDecimal("valor_pago"),
                 reader.GetDecimal("saldo_devedor"),
-                reader.GetString("criado_por")));
+                reader.GetString("criado_por"),
+                reader.NullableString("motivo_cancelamento")));
         }
 
         return pedidos;

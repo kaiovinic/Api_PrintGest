@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using MySqlConnector;
 using PrintGest.Application.Abstractions;
 using PrintGest.Infrastructure.Data;
+using System.ComponentModel.DataAnnotations;
 
 namespace PrintGest.Api.Controllers;
 
@@ -50,6 +51,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
                    p.tamanhos_masculinos,
                    p.tamanhos_femininos,
                    p.observacao,
+                   p.motivo_cancelamento,
                    p.total,
                    p.valor_pago,
                    p.saldo_devedor
@@ -89,6 +91,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
             Frente = reader.NullableString("frente"),
             Fundo = reader.NullableString("fundo"),
             Observacao = reader.NullableString("observacao"),
+            MotivoCancelamento = reader.NullableString("motivo_cancelamento"),
             OutrosItens = reader.NullableString("tamanhos_femininos"),
             Total = reader.GetDecimal("total"),
             ValorPago = reader.GetDecimal("valor_pago"),
@@ -143,7 +146,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         if (await command.ExecuteNonQueryAsync(cancellationToken) == 0)
         {
             await transaction.RollbackAsync(cancellationToken);
-            return NotFound();
+            return await CriarRespostaEdicaoOrcamentoNaoPermitida(connection, id, cancellationToken);
         }
 
         await AtualizarCliente(connection, transaction, request, cancellationToken);
@@ -250,9 +253,9 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
     }
 
     [HttpPatch("{id:long}/finalizar")]
-    public Task<IActionResult> Finalizar(long id, [FromBody] AlterarStatusPedidoRequest request, CancellationToken cancellationToken)
+    public Task<IActionResult> Finalizar(long id, [FromBody] FinalizarPedidoRequest request, CancellationToken cancellationToken)
     {
-        return AlterarStatus(id, "FINALIZADO", request.UsuarioId, request.Observacao, cancellationToken);
+        return FinalizarPedido(id, request, cancellationToken);
     }
 
     private async Task<long> CriarPedidoInterno(PedidoRequest request, string tipo, string status, CancellationToken cancellationToken)
@@ -291,6 +294,63 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
     {
         await using var connection = factory.Create();
         await connection.OpenAsync(cancellationToken);
+
+        await using var consulta = connection.CreateCommand();
+        consulta.CommandText = "SELECT tipo, status, saldo_devedor FROM pedidos WHERE id = @id LIMIT 1;";
+        consulta.Parameters.AddWithValue("@id", id);
+
+        await using var reader = await consulta.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return NotFound(new { mensagem = "Pedido ou orçamento não encontrado." });
+        }
+
+        var tipoAtual = reader.GetString("tipo");
+        var statusAtual = reader.GetString("status");
+        var saldoDevedor = reader.GetDecimal("saldo_devedor");
+        await reader.DisposeAsync();
+
+        if (status == "CANCELADO")
+        {
+            if (string.IsNullOrWhiteSpace(observacao) || observacao.Trim().Length < 10)
+            {
+                return BadRequest(new { mensagem = "Informe o motivo do cancelamento com pelo menos 10 caracteres." });
+            }
+
+            if (statusAtual == "CANCELADO")
+            {
+                return BadRequest(new { mensagem = "Este registro já está cancelado." });
+            }
+
+            if (statusAtual == "FINALIZADO")
+            {
+                return BadRequest(new { mensagem = "Não é possível cancelar um pedido finalizado." });
+            }
+        }
+
+        if (status == "FINALIZADO")
+        {
+            if (tipoAtual != "PEDIDO")
+            {
+                return BadRequest(new { mensagem = "Somente pedidos podem ser finalizados. Orçamentos devem ser convertidos em pedido primeiro." });
+            }
+
+            if (statusAtual == "CANCELADO")
+            {
+                return BadRequest(new { mensagem = "Não é possível finalizar um pedido cancelado." });
+            }
+
+            if (statusAtual == "FINALIZADO")
+            {
+                return BadRequest(new { mensagem = "Este pedido já está finalizado." });
+            }
+
+            if (saldoDevedor > 0)
+            {
+                return BadRequest(new { mensagem = "Não é possível finalizar pedido com saldo devedor em aberto." });
+            }
+        }
+
         await using var command = connection.CreateCommand();
         command.CommandText = status == "FINALIZADO"
             ? """
@@ -306,7 +366,145 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         command.Parameters.AddWithValue("@id", id);
         command.Parameters.AddWithValue("@usuarioId", usuarioId);
         command.Parameters.AddWithValue("@observacao", observacao);
-        return await command.ExecuteNonQueryAsync(cancellationToken) == 0 ? NotFound() : NoContent();
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 0
+            ? NotFound(new { mensagem = $"{FormatarTipo(tipoAtual)} não encontrado." })
+            : NoContent();
+    }
+
+    private async Task<IActionResult> FinalizarPedido(long id, FinalizarPedidoRequest request, CancellationToken cancellationToken)
+    {
+        await using var connection = factory.Create();
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        await using var consulta = connection.CreateCommand();
+        consulta.Transaction = transaction;
+        consulta.CommandText = "SELECT tipo, status, valor_pago, saldo_devedor FROM pedidos WHERE id = @id LIMIT 1 FOR UPDATE;";
+        consulta.Parameters.AddWithValue("@id", id);
+
+        await using var reader = await consulta.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return NotFound(new { mensagem = "Pedido não encontrado." });
+        }
+
+        var tipoAtual = reader.GetString("tipo");
+        var statusAtual = reader.GetString("status");
+        var valorPago = reader.GetDecimal("valor_pago");
+        var saldoDevedor = reader.GetDecimal("saldo_devedor");
+        await reader.DisposeAsync();
+
+        if (tipoAtual != "PEDIDO")
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return BadRequest(new { mensagem = "Somente pedidos podem ser finalizados. Orçamentos devem ser convertidos em pedido primeiro." });
+        }
+
+        if (statusAtual == "CANCELADO")
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return BadRequest(new { mensagem = "Não é possível finalizar um pedido cancelado." });
+        }
+
+        if (statusAtual == "FINALIZADO")
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return BadRequest(new { mensagem = "Este pedido já está finalizado." });
+        }
+
+        if (saldoDevedor > 0)
+        {
+            if (!request.ReceberSaldo)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return BadRequest(new { mensagem = "Não é possível finalizar pedido com saldo devedor em aberto." });
+            }
+
+            var formaPagamento = NormalizarFormaPagamento(request.FormaPagamento);
+            if (string.IsNullOrWhiteSpace(formaPagamento))
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return BadRequest(new { mensagem = "Informe a forma de pagamento para receber o saldo devedor." });
+            }
+
+            await using var pagamento = connection.CreateCommand();
+            pagamento.Transaction = transaction;
+            pagamento.CommandText = """
+                INSERT INTO pagamentos (pedido_id, registrado_por_usuario_id, forma_pagamento, condicao_pagamento, valor_total, observacao)
+                VALUES (@pedidoId, @usuarioId, @formaPagamento, 'PAGAMENTO_NO_PEDIDO', @valorTotal, @observacao);
+                """;
+            pagamento.Parameters.AddWithValue("@pedidoId", id);
+            pagamento.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
+            pagamento.Parameters.AddWithValue("@formaPagamento", formaPagamento);
+            pagamento.Parameters.AddWithValue("@valorTotal", saldoDevedor);
+            pagamento.Parameters.AddWithValue("@observacao", ToDb(request.Observacao ?? "Pagamento do saldo devedor na finalização do pedido."));
+            await pagamento.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var finalizar = connection.CreateCommand();
+        finalizar.Transaction = transaction;
+        finalizar.CommandText = """
+            UPDATE pedidos
+            SET status = 'FINALIZADO',
+                finalizado_por_usuario_id = @usuarioId,
+                finalizado_em = CURRENT_TIMESTAMP,
+                valor_pago = @valorPago,
+                saldo_devedor = 0
+            WHERE id = @id;
+            """;
+        finalizar.Parameters.AddWithValue("@id", id);
+        finalizar.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
+        finalizar.Parameters.AddWithValue("@valorPago", valorPago + saldoDevedor);
+        await finalizar.ExecuteNonQueryAsync(cancellationToken);
+
+        await transaction.CommitAsync(cancellationToken);
+        return NoContent();
+    }
+
+    private static async Task<IActionResult> CriarRespostaEdicaoOrcamentoNaoPermitida(
+        MySqlConnection connection,
+        long id,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT tipo, status FROM pedidos WHERE id = @id LIMIT 1;";
+        command.Parameters.AddWithValue("@id", id);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return new NotFoundObjectResult(new { mensagem = "Pedido ou orçamento não encontrado." });
+        }
+
+        var tipo = reader.GetString("tipo");
+        var status = reader.GetString("status");
+        if (tipo == "PEDIDO")
+        {
+            return new BadRequestObjectResult(new
+            {
+                mensagem = "Não é permitido transformar um pedido em orçamento. Se o cliente desistiu, use a opção Cancelar."
+            });
+        }
+
+        return new BadRequestObjectResult(new { mensagem = $"Não foi possível editar este orçamento porque ele está com status {FormatarStatus(status)}." });
+    }
+
+    private static string FormatarTipo(string tipo)
+    {
+        return tipo == "ORCAMENTO" ? "Orçamento" : "Pedido";
+    }
+
+    private static string FormatarStatus(string status)
+    {
+        return status switch
+        {
+            "ORCADO" => "orçado",
+            "ABERTO" => "aberto",
+            "FINALIZADO" => "finalizado",
+            "CANCELADO" => "cancelado",
+            _ => status.ToLowerInvariant()
+        };
     }
 
     private static void PreencherParametrosPedido(System.Data.Common.DbCommand command, PedidoRequest request, long? clienteId = null)
@@ -478,8 +676,10 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
 }
 
 public sealed record PedidoRequest(
+    [Required(ErrorMessage = "Informe o número do pedido ou orçamento.")]
     string Numero,
     long ClienteId,
+    [Required(ErrorMessage = "Informe o nome do cliente.")]
     string ClienteNome,
     string? Empresa,
     string? CpfCnpj,
@@ -501,10 +701,14 @@ public sealed record PedidoRequest(
     IReadOnlyList<ItemPedidoRequest> Itens);
 
 public sealed record ItemPedidoRequest(
+    [Required(ErrorMessage = "Informe a descrição do item.")]
     string Descricao,
     string? Tamanho,
+    [Range(1, int.MaxValue, ErrorMessage = "A quantidade do item deve ser maior que zero.")]
     int Quantidade,
+    [Range(0.01, double.MaxValue, ErrorMessage = "O valor unitário deve ser maior que zero.")]
     decimal ValorUnitario,
+    [Range(0.01, double.MaxValue, ErrorMessage = "O valor total do item deve ser maior que zero.")]
     decimal ValorTotal);
 
 public sealed record ConverterPedidoRequest(
@@ -513,4 +717,15 @@ public sealed record ConverterPedidoRequest(
     string CondicaoPagamento,
     decimal ValorEntrada);
 
-public sealed record AlterarStatusPedidoRequest(long UsuarioId, string? Observacao);
+public sealed record AlterarStatusPedidoRequest(
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuário responsável pela alteração.")]
+    long UsuarioId,
+    [MinLength(10, ErrorMessage = "Informe o motivo do cancelamento com pelo menos 10 caracteres.")]
+    string? Observacao);
+
+public sealed record FinalizarPedidoRequest(
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuário responsável pela finalização.")]
+    long UsuarioId,
+    string? Observacao,
+    bool ReceberSaldo,
+    string? FormaPagamento);

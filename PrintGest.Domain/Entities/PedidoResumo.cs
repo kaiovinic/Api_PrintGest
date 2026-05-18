@@ -13,4 +13,5 @@ public sealed record PedidoResumo(
     decimal Total,
     decimal ValorPago,
     decimal SaldoDevedor,
-    string CriadoPor);
+    string CriadoPor,
+    string? MotivoCancelamento);
