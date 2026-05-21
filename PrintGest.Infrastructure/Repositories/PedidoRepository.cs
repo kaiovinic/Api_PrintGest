@@ -1,4 +1,4 @@
-﻿using PrintGest.Application.Abstractions;
+using PrintGest.Application.Abstractions;
 using PrintGest.Domain.Entities;
 using PrintGest.Infrastructure.Data;
 using MySqlConnector;
@@ -7,13 +7,29 @@ namespace PrintGest.Infrastructure.Repositories;
 
 public sealed class PedidoRepository(MySqlConnectionFactory factory) : IPedidoRepository
 {
-    public async Task<IReadOnlyList<PedidoResumo>> ListAsync(PedidoFiltro filtro, CancellationToken cancellationToken = default)
+    public async Task<ResultadoPaginado<PedidoResumo>> ListAsync(PedidoFiltro filtro, CancellationToken cancellationToken = default)
     {
         var pedidos = new List<PedidoResumo>();
         await using var connection = factory.Create();
         await connection.OpenAsync(cancellationToken);
         await GarantirColunaValorEstornado(connection, cancellationToken);
         var periodo = ResolverPeriodo(filtro);
+
+        var pagina = Math.Max(filtro.Pagina, 1);
+        var tamanhoPagina = Math.Clamp(filtro.TamanhoPagina, 5, 100);
+        var offset = (pagina - 1) * tamanhoPagina;
+        var statusFiltro = NormalizarStatus(filtro.Status);
+
+        await using var totalCommand = connection.CreateCommand();
+        totalCommand.CommandText = """
+            SELECT COUNT(*)
+            FROM pedidos p
+            WHERE p.data_pedido BETWEEN @inicio AND @fim
+              AND (@status IS NULL OR p.status = @status);
+            """;
+        PreencherFiltros(totalCommand, periodo, statusFiltro);
+        var total = Convert.ToInt32(await totalCommand.ExecuteScalarAsync(cancellationToken));
+        var totalPaginas = total == 0 ? 1 : (int)Math.Ceiling(total / (double)tamanhoPagina);
 
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -25,11 +41,12 @@ public sealed class PedidoRepository(MySqlConnectionFactory factory) : IPedidoRe
             INNER JOIN usuarios u ON u.id = p.criado_por_usuario_id
             WHERE p.data_pedido BETWEEN @inicio AND @fim
               AND (@status IS NULL OR p.status = @status)
-            ORDER BY p.data_pedido DESC, p.id DESC;
+            ORDER BY p.data_pedido DESC, p.id DESC
+            LIMIT @limit OFFSET @offset;
             """;
-        command.Parameters.AddWithValue("@inicio", periodo.Inicio);
-        command.Parameters.AddWithValue("@fim", periodo.Fim);
-        command.Parameters.AddWithValue("@status", NormalizarStatus(filtro.Status) is { } status ? status : DBNull.Value);
+        PreencherFiltros(command, periodo, statusFiltro);
+        command.Parameters.AddWithValue("@limit", tamanhoPagina);
+        command.Parameters.AddWithValue("@offset", offset);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -37,7 +54,7 @@ public sealed class PedidoRepository(MySqlConnectionFactory factory) : IPedidoRe
             pedidos.Add(MapResumo(reader));
         }
 
-        return pedidos;
+        return new ResultadoPaginado<PedidoResumo>(pedidos, total, pagina, tamanhoPagina, totalPaginas);
     }
 
     public async Task<IReadOnlyList<PedidoResumo>> ListRecentAsync(CancellationToken cancellationToken = default)
@@ -69,6 +86,13 @@ public sealed class PedidoRepository(MySqlConnectionFactory factory) : IPedidoRe
         return pedidos;
     }
 
+
+    private static void PreencherFiltros(MySqlCommand command, (DateTime Inicio, DateTime Fim) periodo, string? status)
+    {
+        command.Parameters.AddWithValue("@inicio", periodo.Inicio);
+        command.Parameters.AddWithValue("@fim", periodo.Fim);
+        command.Parameters.AddWithValue("@status", status is null ? DBNull.Value : status);
+    }
     private static PedidoResumo MapResumo(MySqlDataReader reader)
     {
         var entregaOrdinal = reader.GetOrdinal("data_entrega");

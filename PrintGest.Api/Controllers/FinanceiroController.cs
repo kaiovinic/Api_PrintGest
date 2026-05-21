@@ -8,16 +8,16 @@ namespace PrintGest.Api.Controllers;
 public sealed class FinanceiroController(IFinanceiroRepository financeiro) : ControllerBase
 {
     [HttpGet("vendas")]
-    public async Task<IActionResult> Vendas([FromQuery] int? ano, [FromQuery] int? mes, [FromQuery] DateOnly? inicio, [FromQuery] DateOnly? fim, [FromQuery] string? status, CancellationToken cancellationToken)
+    public async Task<IActionResult> Vendas([FromQuery] int? ano, [FromQuery] int? mes, [FromQuery] DateOnly? inicio, [FromQuery] DateOnly? fim, [FromQuery] string? status, [FromQuery] int pagina = 1, [FromQuery] int tamanhoPagina = 10, CancellationToken cancellationToken = default)
     {
-        var resultado = await financeiro.ObterVendasAsync(new FinanceiroFiltro(ano, mes, inicio, fim, status), cancellationToken);
+        var resultado = await financeiro.ObterVendasAsync(new FinanceiroFiltro(ano, mes, inicio, fim, status, pagina, tamanhoPagina), cancellationToken);
         return Ok(resultado);
     }
 
     [HttpGet("entradas")]
-    public async Task<IActionResult> Entradas([FromQuery] int? ano, [FromQuery] int? mes, [FromQuery] DateOnly? inicio, [FromQuery] DateOnly? fim, CancellationToken cancellationToken)
+    public async Task<IActionResult> Entradas([FromQuery] int? ano, [FromQuery] int? mes, [FromQuery] DateOnly? inicio, [FromQuery] DateOnly? fim, [FromQuery] int pagina = 1, [FromQuery] int tamanhoPagina = 10, CancellationToken cancellationToken = default)
     {
-        var resultado = await financeiro.ObterEntradasAsync(new FinanceiroFiltro(ano, mes, inicio, fim), cancellationToken);
+        var resultado = await financeiro.ObterEntradasAsync(new FinanceiroFiltro(ano, mes, inicio, fim, null, pagina, tamanhoPagina), cancellationToken);
         return Ok(resultado);
     }
 
@@ -48,7 +48,18 @@ public sealed class FinanceiroController(IFinanceiroRepository financeiro) : Con
     [HttpPatch("despesas/{id:long}/pagar")]
     public async Task<IActionResult> PagarDespesa(long id, CancellationToken cancellationToken)
     {
-        return await financeiro.PagarDespesaAsync(id, cancellationToken) ? NoContent() : NotFound();
+        return await financeiro.PagarDespesaAsync(id, cancellationToken) ? NoContent() : NotFound(new { mensagem = "Despesa nao encontrada." });
+    }
+
+    [HttpPut("despesas/{grupoDespesaId}")]
+    public async Task<IActionResult> AtualizarDespesa(string grupoDespesaId, [FromBody] FinanceiroDespesaAtualizarRequest request, CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid)
+        {
+            return ValidationProblem(ModelState);
+        }
+
+        return await financeiro.AtualizarDespesaAsync(grupoDespesaId, request, cancellationToken) ? NoContent() : NotFound(new { mensagem = "Despesa nao encontrada." });
     }
 
     [HttpGet("graficos")]

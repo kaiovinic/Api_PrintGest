@@ -83,7 +83,7 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
         return new FinanceiroVendasResult(
             new FinanceiroPeriodo(DateOnly.FromDateTime(periodo.Inicio), DateOnly.FromDateTime(periodo.Fim.Date)),
             new FinanceiroVendasResumo(total, pago, saldo, pedidos.Count, devolucoes, devolvido, emAndamento, entrouHoje),
-            pedidos);
+            Paginar(pedidos, filtro.Pagina, filtro.TamanhoPagina));
     }
 
     public async Task<FinanceiroEntradasResult> ObterEntradasAsync(FinanceiroFiltro filtro, CancellationToken cancellationToken = default)
@@ -147,7 +147,7 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
 
         return new FinanceiroEntradasResult(
             new FinanceiroEntradasResumo(dinheiro + pix + credito + debito, dinheiro, pix, credito, debito, hojeTotal),
-            itens);
+            Paginar(itens, filtro.Pagina, filtro.TamanhoPagina));
     }
 
     public async Task<FinanceiroDespesasResult> ListarDespesasAsync(FinanceiroFiltro filtro, CancellationToken cancellationToken = default)
@@ -162,7 +162,10 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
             SELECT id, grupo_despesa_id, numero_parcela, total_parcelas, categoria, descricao, valor, valor_total, vencimento, status, data_pagamento, observacao
             FROM despesas
             WHERE vencimento BETWEEN @inicio AND @fim
-            ORDER BY vencimento ASC, grupo_despesa_id, numero_parcela;
+            ORDER BY CASE WHEN vencimento = CURRENT_DATE() AND status <> 'PAGO' THEN 0 ELSE 1 END,
+                     vencimento ASC,
+                     grupo_despesa_id,
+                     numero_parcela;
             """;
         command.Parameters.AddWithValue("@inicio", periodo.Inicio.Date);
         command.Parameters.AddWithValue("@fim", periodo.Fim.Date);
@@ -268,6 +271,68 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
         return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
+    public async Task<bool> AtualizarDespesaAsync(string grupoDespesaId, FinanceiroDespesaAtualizarRequest request, CancellationToken cancellationToken = default)
+    {
+        await using var connection = factory.Create();
+        await connection.OpenAsync(cancellationToken);
+        await GarantirEstruturaFinanceiro(connection, cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id
+            FROM despesas
+            WHERE grupo_despesa_id = @grupoId
+            ORDER BY numero_parcela;
+            """;
+        command.Parameters.AddWithValue("@grupoId", grupoDespesaId);
+
+        var ids = new List<long>();
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                ids.Add(reader.GetInt64("id"));
+            }
+        }
+
+        if (ids.Count == 0)
+        {
+            return false;
+        }
+
+        var valorParcela = Math.Round(request.Valor / ids.Count, 2);
+        var restante = request.Valor;
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        for (var index = 0; index < ids.Count; index++)
+        {
+            var valor = index == ids.Count - 1 ? restante : valorParcela;
+            restante -= valor;
+            await using var update = connection.CreateCommand();
+            update.Transaction = transaction;
+            update.CommandText = """
+                UPDATE despesas
+                SET categoria = @categoria,
+                    descricao = @descricao,
+                    valor = @valor,
+                    valor_total = @valorTotal,
+                    vencimento = @vencimento,
+                    observacao = @observacao
+                WHERE id = @id;
+                """;
+            update.Parameters.AddWithValue("@id", ids[index]);
+            update.Parameters.AddWithValue("@categoria", request.Categoria.Trim());
+            update.Parameters.AddWithValue("@descricao", request.Descricao.Trim());
+            update.Parameters.AddWithValue("@valor", valor);
+            update.Parameters.AddWithValue("@valorTotal", request.Valor);
+            update.Parameters.AddWithValue("@vencimento", request.Vencimento.AddMonths(index).ToDateTime(TimeOnly.MinValue));
+            update.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
+            await update.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return true;
+    }
+
     public async Task<FinanceiroGraficosResult> ObterGraficosAsync(int? ano, int? mes, CancellationToken cancellationToken = default)
     {
         await using var connection = factory.Create();
@@ -327,6 +392,16 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
         return itens;
     }
 
+    private static ResultadoPaginado<T> Paginar<T>(IReadOnlyList<T> itens, int pagina, int tamanhoPagina)
+    {
+        var pageSize = Math.Clamp(tamanhoPagina, 1, 100);
+        var total = itens.Count;
+        var totalPaginas = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
+        var page = Math.Clamp(pagina, 1, totalPaginas);
+        var pageItems = itens.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+        return new ResultadoPaginado<T>(pageItems, total, page, pageSize, totalPaginas);
+    }
+
     private static (DateTime Inicio, DateTime Fim) ResolverPeriodo(FinanceiroFiltro filtro)
     {
         if (filtro.Inicio is not null || filtro.Fim is not null)
@@ -357,10 +432,33 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
         await GarantirColuna(connection, "despesas", "numero_parcela", "ALTER TABLE despesas ADD COLUMN numero_parcela INT NOT NULL DEFAULT 1 AFTER grupo_despesa_id;", cancellationToken);
         await GarantirColuna(connection, "despesas", "total_parcelas", "ALTER TABLE despesas ADD COLUMN total_parcelas INT NOT NULL DEFAULT 1 AFTER numero_parcela;", cancellationToken);
         await GarantirColuna(connection, "despesas", "valor_total", "ALTER TABLE despesas ADD COLUMN valor_total DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER valor;", cancellationToken);
+        await AjustarColunaCategoriaDespesa(connection, cancellationToken);
 
         await using var update = connection.CreateCommand();
         update.CommandText = "UPDATE despesas SET grupo_despesa_id = COALESCE(grupo_despesa_id, CONCAT('LEGADO-', id)), valor_total = CASE WHEN valor_total = 0 THEN valor ELSE valor_total END;";
         await update.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task AjustarColunaCategoriaDespesa(MySqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var consulta = connection.CreateCommand();
+        consulta.CommandText = """
+            SELECT DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'despesas'
+              AND COLUMN_NAME = 'categoria'
+            LIMIT 1;
+            """;
+        var tipoAtual = Convert.ToString(await consulta.ExecuteScalarAsync(cancellationToken));
+        if (string.Equals(tipoAtual, "varchar", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "ALTER TABLE despesas MODIFY COLUMN categoria VARCHAR(120) NOT NULL;";
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task GarantirColuna(MySqlConnection connection, string tabela, string coluna, string alterSql, CancellationToken cancellationToken)
@@ -378,9 +476,16 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
         var existe = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)) > 0;
         if (existe) return;
 
-        await using var alter = connection.CreateCommand();
+                await using var alter = connection.CreateCommand();
         alter.CommandText = alterSql;
-        await alter.ExecuteNonQueryAsync(cancellationToken);
+        try
+        {
+            await alter.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (MySqlException exception) when (exception.Number == 1060)
+        {
+            // Outra requisicao pode ter criado a coluna entre a consulta e o ALTER TABLE.
+        }
     }
 
     private static DateOnly? GetNullableDateOnly(MySqlDataReader reader, string column)

@@ -1,4 +1,4 @@
-using System.ComponentModel.DataAnnotations;
+﻿using System.ComponentModel.DataAnnotations;
 
 namespace PrintGest.Application.Abstractions;
 
@@ -9,17 +9,18 @@ public interface IFinanceiroRepository
     Task<FinanceiroDespesasResult> ListarDespesasAsync(FinanceiroFiltro filtro, CancellationToken cancellationToken = default);
     Task<long> CriarDespesaAsync(FinanceiroDespesaRequest request, CancellationToken cancellationToken = default);
     Task<bool> PagarDespesaAsync(long id, CancellationToken cancellationToken = default);
+    Task<bool> AtualizarDespesaAsync(string grupoDespesaId, FinanceiroDespesaAtualizarRequest request, CancellationToken cancellationToken = default);
     Task<FinanceiroGraficosResult> ObterGraficosAsync(int? ano, int? mes, CancellationToken cancellationToken = default);
 }
 
-public sealed record FinanceiroFiltro(int? Ano, int? Mes, DateOnly? Inicio, DateOnly? Fim, string? Status = null);
+public sealed record FinanceiroFiltro(int? Ano, int? Mes, DateOnly? Inicio, DateOnly? Fim, string? Status = null, int Pagina = 1, int TamanhoPagina = 10);
 
 public sealed record FinanceiroPeriodo(DateOnly Inicio, DateOnly Fim);
 
 public sealed record FinanceiroVendasResult(
     FinanceiroPeriodo Periodo,
     FinanceiroVendasResumo Resumo,
-    IReadOnlyList<FinanceiroPedido> Pedidos);
+    ResultadoPaginado<FinanceiroPedido> Pedidos);
 
 public sealed record FinanceiroVendasResumo(
     decimal TotalVendas,
@@ -48,7 +49,7 @@ public sealed record FinanceiroPedido(
 
 public sealed record FinanceiroEntradasResult(
     FinanceiroEntradasResumo Resumo,
-    IReadOnlyList<FinanceiroEntrada> Entradas);
+    ResultadoPaginado<FinanceiroEntrada> Entradas);
 
 public sealed record FinanceiroEntradasResumo(
     decimal Total,
@@ -94,22 +95,35 @@ public sealed record FinanceiroDespesa(
     string? Observacao);
 
 public sealed record FinanceiroDespesaRequest(
-    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuÃƒÂ¡rio responsÃƒÂ¡vel pelo lanÃƒÂ§amento.")]
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuario responsavel pelo lancamento.")]
     long UsuarioId,
     [Required(ErrorMessage = "Informe a categoria da despesa.")]
-    [StringLength(80, ErrorMessage = "A categoria deve ter no mÃƒÂ¡ximo 80 caracteres.")]
+    [StringLength(80, ErrorMessage = "A categoria deve ter no maximo 80 caracteres.")]
     string Categoria,
-    [Required(ErrorMessage = "Informe a descriÃƒÂ§ÃƒÂ£o da despesa.")]
-    [StringLength(200, ErrorMessage = "A descriÃƒÂ§ÃƒÂ£o deve ter no mÃƒÂ¡ximo 200 caracteres.")]
+    [Required(ErrorMessage = "Informe a descricao da despesa.")]
+    [StringLength(200, ErrorMessage = "A descricao deve ter no maximo 200 caracteres.")]
     string Descricao,
     [Range(0.01, double.MaxValue, ErrorMessage = "Informe um valor maior que zero.")]
     decimal Valor,
     DateOnly Vencimento,
-    [Required(ErrorMessage = "Informe se a despesa ÃƒÂ© ÃƒÂ  vista ou parcelada.")]
+    [Required(ErrorMessage = "Informe se a despesa e a vista ou parcelada.")]
     string CondicaoPagamento,
     [Range(1, 120, ErrorMessage = "Informe uma quantidade de parcelas entre 1 e 120.")]
     int QuantidadeParcelas,
-    [StringLength(300, ErrorMessage = "A observaÃƒÂ§ÃƒÂ£o deve ter no mÃƒÂ¡ximo 300 caracteres.")]
+    [StringLength(300, ErrorMessage = "A observacao deve ter no maximo 300 caracteres.")]
+    string? Observacao);
+
+public sealed record FinanceiroDespesaAtualizarRequest(
+    [Required(ErrorMessage = "Informe a categoria da despesa.")]
+    [StringLength(80, ErrorMessage = "A categoria deve ter no maximo 80 caracteres.")]
+    string Categoria,
+    [Required(ErrorMessage = "Informe a descricao da despesa.")]
+    [StringLength(200, ErrorMessage = "A descricao deve ter no maximo 200 caracteres.")]
+    string Descricao,
+    [Range(0.01, double.MaxValue, ErrorMessage = "Informe um valor maior que zero.")]
+    decimal Valor,
+    DateOnly Vencimento,
+    [StringLength(300, ErrorMessage = "A observacao deve ter no maximo 300 caracteres.")]
     string? Observacao);
 
 public sealed record FinanceiroGraficosResult(

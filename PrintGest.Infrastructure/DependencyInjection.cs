@@ -1,4 +1,4 @@
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using PrintGest.Application.Abstractions;
 using PrintGest.Infrastructure.Data;
 using PrintGest.Infrastructure.Repositories;
@@ -15,7 +15,8 @@ public static class DependencyInjection
         services.AddScoped<IClienteRepository, ClienteRepository>();
         services.AddScoped<IPedidoRepository, PedidoRepository>();
         services.AddScoped<IFinanceiroRepository, FinanceiroRepository>();
+        services.AddScoped<IEstoqueRepository, EstoqueRepository>();
+        services.AddScoped<ICaixaRepository, CaixaRepository>();
         return services;
     }
 }
-
