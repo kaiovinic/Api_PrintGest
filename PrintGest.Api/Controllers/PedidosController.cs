@@ -11,9 +11,9 @@ namespace PrintGest.Api.Controllers;
 public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnectionFactory factory) : ControllerBase
 {
     [HttpGet]
-    public async Task<IActionResult> Listar(CancellationToken cancellationToken)
+    public async Task<IActionResult> Listar([FromQuery, Range(2000, 2100, ErrorMessage = "Informe um ano vÃƒÂ¡lido.")] int? ano, [FromQuery, Range(1, 12, ErrorMessage = "Informe um mÃƒÂªs entre 1 e 12.")] int? mes, [FromQuery] DateOnly? inicio, [FromQuery] DateOnly? fim, [FromQuery] string? status, CancellationToken cancellationToken)
     {
-        return Ok(await pedidos.ListRecentAsync(cancellationToken));
+        return Ok(await pedidos.ListAsync(new PedidoFiltro(ano, mes, inicio, fim, status), cancellationToken));
     }
 
     [HttpGet("recentes")]
@@ -240,7 +240,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         pagamento.Transaction = transaction;
         pagamento.CommandText = """
             INSERT INTO pagamentos (pedido_id, registrado_por_usuario_id, forma_pagamento, condicao_pagamento, valor_total, observacao)
-            SELECT id, @usuarioId, @formaPagamento, @condicaoPagamento, @valorEntrada, 'Conversão de orçamento em pedido'
+            SELECT id, @usuarioId, @formaPagamento, @condicaoPagamento, @valorEntrada, 'ConversÃƒÆ’Ã‚Â£o de orÃƒÆ’Ã‚Â§amento em pedido'
             FROM pedidos
             WHERE id = @id;
             """;
@@ -252,7 +252,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         await pagamento.ExecuteNonQueryAsync(cancellationToken);
 
         await transaction.CommitAsync(cancellationToken);
-        return Ok(new { mensagem = "Orçamento convertido em pedido." });
+        return Ok(new { mensagem = "OrÃƒÆ’Ã‚Â§amento convertido em pedido." });
     }
 
     [HttpPatch("{id:long}/cancelar")]
@@ -321,7 +321,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO pagamentos (pedido_id, registrado_por_usuario_id, forma_pagamento, condicao_pagamento, valor_total, observacao)
-            VALUES (@pedidoId, @usuarioId, @formaPagamento, @condicaoPagamento, @valorTotal, 'Entrada registrada na criação do pedido');
+            VALUES (@pedidoId, @usuarioId, @formaPagamento, @condicaoPagamento, @valorTotal, 'Entrada registrada na criaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o do pedido');
             """;
         command.Parameters.AddWithValue("@pedidoId", pedidoId);
         command.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
@@ -444,7 +444,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         await using var reader = await consulta.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
-            return NotFound(new { mensagem = "Pedido ou orçamento não encontrado." });
+            return NotFound(new { mensagem = "Pedido ou orÃƒÆ’Ã‚Â§amento nÃƒÆ’Ã‚Â£o encontrado." });
         }
 
         var tipoAtual = reader.GetString("tipo");
@@ -461,12 +461,12 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
 
             if (statusAtual == "CANCELADO")
             {
-                return BadRequest(new { mensagem = "Este registro já está cancelado." });
+                return BadRequest(new { mensagem = "Este registro jÃƒÆ’Ã‚Â¡ estÃƒÆ’Ã‚Â¡ cancelado." });
             }
 
             if (statusAtual == "FINALIZADO")
             {
-                return BadRequest(new { mensagem = "Não é possível cancelar um pedido finalizado." });
+                return BadRequest(new { mensagem = "NÃƒÆ’Ã‚Â£o ÃƒÆ’Ã‚Â© possÃƒÆ’Ã‚Â­vel cancelar um pedido finalizado." });
             }
         }
 
@@ -474,22 +474,22 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         {
             if (tipoAtual != "PEDIDO")
             {
-                return BadRequest(new { mensagem = "Somente pedidos podem ser finalizados. Orçamentos devem ser convertidos em pedido primeiro." });
+                return BadRequest(new { mensagem = "Somente pedidos podem ser finalizados. OrÃƒÆ’Ã‚Â§amentos devem ser convertidos em pedido primeiro." });
             }
 
             if (statusAtual == "CANCELADO")
             {
-                return BadRequest(new { mensagem = "Não é possível finalizar um pedido cancelado." });
+                return BadRequest(new { mensagem = "NÃƒÆ’Ã‚Â£o ÃƒÆ’Ã‚Â© possÃƒÆ’Ã‚Â­vel finalizar um pedido cancelado." });
             }
 
             if (statusAtual == "FINALIZADO")
             {
-                return BadRequest(new { mensagem = "Este pedido já está finalizado." });
+                return BadRequest(new { mensagem = "Este pedido jÃƒÆ’Ã‚Â¡ estÃƒÆ’Ã‚Â¡ finalizado." });
             }
 
             if (saldoDevedor > 0)
             {
-                return BadRequest(new { mensagem = "Não é possível finalizar pedido com saldo devedor em aberto." });
+                return BadRequest(new { mensagem = "NÃƒÆ’Ã‚Â£o ÃƒÆ’Ã‚Â© possÃƒÆ’Ã‚Â­vel finalizar pedido com saldo devedor em aberto." });
             }
         }
 
@@ -509,7 +509,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         command.Parameters.AddWithValue("@usuarioId", usuarioId);
         command.Parameters.AddWithValue("@observacao", observacao);
         return await command.ExecuteNonQueryAsync(cancellationToken) == 0
-            ? NotFound(new { mensagem = $"{FormatarTipo(tipoAtual)} não encontrado." })
+            ? NotFound(new { mensagem = $"{FormatarTipo(tipoAtual)} nÃƒÆ’Ã‚Â£o encontrado." })
             : NoContent();
     }
 
@@ -535,7 +535,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         if (!await reader.ReadAsync(cancellationToken))
         {
             await transaction.RollbackAsync(cancellationToken);
-            return NotFound(new { mensagem = "Pedido ou orçamento não encontrado." });
+            return NotFound(new { mensagem = "Pedido ou orÃƒÆ’Ã‚Â§amento nÃƒÆ’Ã‚Â£o encontrado." });
         }
 
         var tipoAtual = reader.GetString("tipo");
@@ -552,13 +552,13 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         if (statusAtual == "CANCELADO")
         {
             await transaction.RollbackAsync(cancellationToken);
-            return BadRequest(new { mensagem = "Este registro já está cancelado." });
+            return BadRequest(new { mensagem = "Este registro jÃƒÆ’Ã‚Â¡ estÃƒÆ’Ã‚Â¡ cancelado." });
         }
 
         if (statusAtual == "FINALIZADO")
         {
             await transaction.RollbackAsync(cancellationToken);
-            return BadRequest(new { mensagem = "Não é possível cancelar um pedido finalizado." });
+            return BadRequest(new { mensagem = "NÃƒÆ’Ã‚Â£o ÃƒÆ’Ã‚Â© possÃƒÆ’Ã‚Â­vel cancelar um pedido finalizado." });
         }
 
         if (request.ValorDevolvido < 0 || request.ValorDevolvido > valorPago)
@@ -570,13 +570,13 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         if (request.ValorDevolvido > 0 && string.IsNullOrWhiteSpace(request.FormaDevolucao))
         {
             await transaction.RollbackAsync(cancellationToken);
-            return BadRequest(new { mensagem = "Informe a forma da devolução ao cliente." });
+            return BadRequest(new { mensagem = "Informe a forma da devoluÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o ao cliente." });
         }
 
         if (request.ValorDevolvido > 0 && request.ValorDevolvido < valorPago && string.IsNullOrWhiteSpace(request.ObservacaoEstorno))
         {
             await transaction.RollbackAsync(cancellationToken);
-            return BadRequest(new { mensagem = "Informe uma observação explicando a devolução parcial." });
+            return BadRequest(new { mensagem = "Informe uma observaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o explicando a devoluÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o parcial." });
         }
 
         await using var command = connection.CreateCommand();
@@ -610,7 +610,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
                 """;
             caixa.Parameters.AddWithValue("@pedidoId", id);
             caixa.Parameters.AddWithValue("@formaPagamento", NormalizarFormaPagamento(request.FormaDevolucao));
-            caixa.Parameters.AddWithValue("@descricao", $"Devolução do {FormatarTipo(tipoAtual).ToLowerInvariant()} cancelado");
+            caixa.Parameters.AddWithValue("@descricao", $"DevoluÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o do {FormatarTipo(tipoAtual).ToLowerInvariant()} cancelado");
             caixa.Parameters.AddWithValue("@valor", request.ValorDevolvido);
             caixa.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
             caixa.Parameters.AddWithValue("@observacao", ToDb(request.ObservacaoEstorno ?? request.Observacao));
@@ -736,7 +736,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         if (!await reader.ReadAsync(cancellationToken))
         {
             await transaction.RollbackAsync(cancellationToken);
-            return NotFound(new { mensagem = "Pedido não encontrado." });
+            return NotFound(new { mensagem = "Pedido nÃƒÆ’Ã‚Â£o encontrado." });
         }
 
         var tipoAtual = reader.GetString("tipo");
@@ -748,19 +748,19 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         if (tipoAtual != "PEDIDO")
         {
             await transaction.RollbackAsync(cancellationToken);
-            return BadRequest(new { mensagem = "Somente pedidos podem ser finalizados. Orçamentos devem ser convertidos em pedido primeiro." });
+            return BadRequest(new { mensagem = "Somente pedidos podem ser finalizados. OrÃƒÆ’Ã‚Â§amentos devem ser convertidos em pedido primeiro." });
         }
 
         if (statusAtual == "CANCELADO")
         {
             await transaction.RollbackAsync(cancellationToken);
-            return BadRequest(new { mensagem = "Não é possível finalizar um pedido cancelado." });
+            return BadRequest(new { mensagem = "NÃƒÆ’Ã‚Â£o ÃƒÆ’Ã‚Â© possÃƒÆ’Ã‚Â­vel finalizar um pedido cancelado." });
         }
 
         if (statusAtual == "FINALIZADO")
         {
             await transaction.RollbackAsync(cancellationToken);
-            return BadRequest(new { mensagem = "Este pedido já está finalizado." });
+            return BadRequest(new { mensagem = "Este pedido jÃƒÆ’Ã‚Â¡ estÃƒÆ’Ã‚Â¡ finalizado." });
         }
 
         if (saldoDevedor > 0)
@@ -768,7 +768,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
             if (!request.ReceberSaldo)
             {
                 await transaction.RollbackAsync(cancellationToken);
-                return BadRequest(new { mensagem = "Não é possível finalizar pedido com saldo devedor em aberto." });
+                return BadRequest(new { mensagem = "NÃƒÆ’Ã‚Â£o ÃƒÆ’Ã‚Â© possÃƒÆ’Ã‚Â­vel finalizar pedido com saldo devedor em aberto." });
             }
 
             var formaPagamento = NormalizarFormaPagamento(request.FormaPagamento);
@@ -788,7 +788,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
             pagamento.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
             pagamento.Parameters.AddWithValue("@formaPagamento", formaPagamento);
             pagamento.Parameters.AddWithValue("@valorTotal", saldoDevedor);
-            pagamento.Parameters.AddWithValue("@observacao", ToDb(request.Observacao ?? "Pagamento do saldo devedor na finalização do pedido."));
+            pagamento.Parameters.AddWithValue("@observacao", ToDb(request.Observacao ?? "Pagamento do saldo devedor na finalizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o do pedido."));
             await pagamento.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -824,7 +824,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
-            return new NotFoundObjectResult(new { mensagem = "Pedido ou orçamento não encontrado." });
+            return new NotFoundObjectResult(new { mensagem = "Pedido ou orÃƒÆ’Ã‚Â§amento nÃƒÆ’Ã‚Â£o encontrado." });
         }
 
         var tipo = reader.GetString("tipo");
@@ -833,23 +833,23 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         {
             return new BadRequestObjectResult(new
             {
-                mensagem = "Não é permitido transformar um pedido em orçamento. Se o cliente desistiu, use a opção Cancelar."
+                mensagem = "NÃƒÆ’Ã‚Â£o ÃƒÆ’Ã‚Â© permitido transformar um pedido em orÃƒÆ’Ã‚Â§amento. Se o cliente desistiu, use a opÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o Cancelar."
             });
         }
 
-        return new BadRequestObjectResult(new { mensagem = $"Não foi possível editar este orçamento porque ele está com status {FormatarStatus(status)}." });
+        return new BadRequestObjectResult(new { mensagem = $"NÃƒÆ’Ã‚Â£o foi possÃƒÆ’Ã‚Â­vel editar este orÃƒÆ’Ã‚Â§amento porque ele estÃƒÆ’Ã‚Â¡ com status {FormatarStatus(status)}." });
     }
 
     private static string FormatarTipo(string tipo)
     {
-        return tipo == "ORCAMENTO" ? "Orçamento" : "Pedido";
+        return tipo == "ORCAMENTO" ? "OrÃƒÆ’Ã‚Â§amento" : "Pedido";
     }
 
     private static string FormatarStatus(string status)
     {
         return status switch
         {
-            "ORCADO" => "orçado",
+            "ORCADO" => "orÃƒÆ’Ã‚Â§ado",
             "ABERTO" => "aberto",
             "FINALIZADO" => "finalizado",
             "CANCELADO" => "cancelado",
@@ -1005,8 +1005,8 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
             null or "" => null,
             "PIX" => "PIX",
             "DINHEIRO" => "DINHEIRO",
-            "CRÉDITO" or "CREDITO" or "CARTÃO DE CRÉDITO" or "CARTAO DE CREDITO" or "CARTAO_CREDITO" => "CARTAO_CREDITO",
-            "DÉBITO" or "DEBITO" or "CARTÃO DE DÉBITO" or "CARTAO DE DEBITO" or "CARTAO_DEBITO" => "CARTAO_DEBITO",
+            "CRÃƒÆ’Ã¢â‚¬Â°DITO" or "CREDITO" or "CARTÃƒÆ’Ã†â€™O DE CRÃƒÆ’Ã¢â‚¬Â°DITO" or "CARTAO DE CREDITO" or "CARTAO_CREDITO" => "CARTAO_CREDITO",
+            "DÃƒÆ’Ã¢â‚¬Â°BITO" or "DEBITO" or "CARTÃƒÆ’Ã†â€™O DE DÃƒÆ’Ã¢â‚¬Â°BITO" or "CARTAO DE DEBITO" or "CARTAO_DEBITO" => "CARTAO_DEBITO",
             _ => formaPagamento
         };
     }
@@ -1016,7 +1016,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
         return condicaoPagamento?.Trim().ToUpperInvariant() switch
         {
             null or "" => null,
-            "PAGO" or "À VISTA" or "A VISTA" or "A_VISTA" => "A_VISTA",
+            "PAGO" or "ÃƒÆ’Ã¢â€šÂ¬ VISTA" or "A VISTA" or "A_VISTA" => "A_VISTA",
             "PAGAMENTO NO PEDIDO" or "PAGAMENTO_NO_PEDIDO" => "PAGAMENTO_NO_PEDIDO",
             "PARCELADO" or "ADIANTAMENTO" => "ADIANTAMENTO",
             "PAGAR NA ENTREGA" => "ADIANTAMENTO",
@@ -1026,70 +1026,102 @@ public sealed class PedidosController(IPedidoRepository pedidos, MySqlConnection
 }
 
 public sealed record PedidoRequest(
-    [Required(ErrorMessage = "Informe o número do pedido ou orçamento.")]
+    [Required(ErrorMessage = "Informe o nÃºmero do pedido ou orÃ§amento.")]
+    [StringLength(30, ErrorMessage = "O nÃºmero deve ter no mÃ¡ximo 30 caracteres.")]
     string Numero,
+    [Range(0, long.MaxValue, ErrorMessage = "Informe um cliente vÃ¡lido.")]
     long ClienteId,
     [Required(ErrorMessage = "Informe o nome do cliente.")]
+    [StringLength(120, ErrorMessage = "O nome do cliente deve ter no mÃ¡ximo 120 caracteres.")]
     string ClienteNome,
+    [StringLength(120, ErrorMessage = "A empresa deve ter no mÃ¡ximo 120 caracteres.")]
     string? Empresa,
+    [StringLength(20, ErrorMessage = "O CPF/CNPJ deve ter no mÃ¡ximo 20 caracteres.")]
     string? CpfCnpj,
+    [StringLength(20, ErrorMessage = "O telefone deve ter no mÃ¡ximo 20 caracteres.")]
     string? Telefone,
+    [StringLength(200, ErrorMessage = "O endereÃ§o deve ter no mÃ¡ximo 200 caracteres.")]
     string? Endereco,
+    [StringLength(80, ErrorMessage = "A cidade deve ter no mÃ¡ximo 80 caracteres.")]
     string? Cidade,
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuÃ¡rio responsÃ¡vel pelo pedido.")]
     long UsuarioId,
     DateOnly DataPedido,
     DateOnly? DataEntrega,
+    [StringLength(120, ErrorMessage = "O vendedor deve ter no mÃ¡ximo 120 caracteres.")]
     string? Vendedor,
+    [StringLength(30, ErrorMessage = "A forma de pagamento deve ter no mÃ¡ximo 30 caracteres.")]
     string? FormaPagamento,
+    [StringLength(30, ErrorMessage = "A condiÃ§Ã£o de pagamento deve ter no mÃ¡ximo 30 caracteres.")]
     string? CondicaoPagamento,
+    [StringLength(500, ErrorMessage = "A descriÃ§Ã£o da frente deve ter no mÃ¡ximo 500 caracteres.")]
     string? Frente,
+    [StringLength(500, ErrorMessage = "A descriÃ§Ã£o do fundo deve ter no mÃ¡ximo 500 caracteres.")]
     string? Fundo,
+    [StringLength(300, ErrorMessage = "A observaÃ§Ã£o deve ter no mÃ¡ximo 300 caracteres.")]
     string? Observacao,
+    [StringLength(300, ErrorMessage = "Outros itens deve ter no mÃ¡ximo 300 caracteres.")]
     string? OutrosItens,
+    [Range(0.01, double.MaxValue, ErrorMessage = "O total do pedido deve ser maior que zero.")]
     decimal Total,
+    [Range(0, double.MaxValue, ErrorMessage = "O valor pago nÃ£o pode ser negativo.")]
     decimal ValorPago,
+    [Required(ErrorMessage = "Informe ao menos um item do pedido.")]
+    [MinLength(1, ErrorMessage = "Informe ao menos um item do pedido.")]
     IReadOnlyList<ItemPedidoRequest> Itens);
 
 public sealed record ItemPedidoRequest(
-    [Required(ErrorMessage = "Informe a descrição do item.")]
+    [Required(ErrorMessage = "Informe a descriÃ§Ã£o do item.")]
+    [StringLength(200, ErrorMessage = "A descriÃ§Ã£o do item deve ter no mÃ¡ximo 200 caracteres.")]
     string Descricao,
+    [StringLength(20, ErrorMessage = "O tamanho deve ter no mÃ¡ximo 20 caracteres.")]
     string? Tamanho,
     [Range(1, int.MaxValue, ErrorMessage = "A quantidade do item deve ser maior que zero.")]
     int Quantidade,
-    [Range(0.01, double.MaxValue, ErrorMessage = "O valor unitário deve ser maior que zero.")]
+    [Range(0.01, double.MaxValue, ErrorMessage = "O valor unitÃ¡rio deve ser maior que zero.")]
     decimal ValorUnitario,
     [Range(0.01, double.MaxValue, ErrorMessage = "O valor total do item deve ser maior que zero.")]
     decimal ValorTotal);
 
 public sealed record ConverterPedidoRequest(
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuÃ¡rio responsÃ¡vel pela conversÃ£o.")]
     long UsuarioId,
+    [Required(ErrorMessage = "Informe a forma de pagamento.")]
     string FormaPagamento,
+    [Required(ErrorMessage = "Informe a condiÃ§Ã£o de pagamento.")]
     string CondicaoPagamento,
+    [Range(0.01, double.MaxValue, ErrorMessage = "Informe um valor de entrada maior que zero.")]
     decimal ValorEntrada);
 
 public sealed record AlterarStatusPedidoRequest(
-    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuário responsável pela alteração.")]
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuÃ¡rio responsÃ¡vel pela alteraÃ§Ã£o.")]
     long UsuarioId,
+    [Required(ErrorMessage = "Informe o motivo do cancelamento.")]
     [MinLength(10, ErrorMessage = "Informe o motivo do cancelamento com pelo menos 10 caracteres.")]
+    [StringLength(300, ErrorMessage = "O motivo do cancelamento deve ter no mÃ¡ximo 300 caracteres.")]
     string? Observacao,
+    [Range(0, double.MaxValue, ErrorMessage = "O valor devolvido nÃ£o pode ser negativo.")]
     decimal ValorDevolvido,
     string? FormaDevolucao,
+    [StringLength(300, ErrorMessage = "A observaÃ§Ã£o do estorno deve ter no mÃ¡ximo 300 caracteres.")]
     string? ObservacaoEstorno);
 
 public sealed record EstornarPedidoRequest(
-    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuario responsavel pela devolucao.")]
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuÃ¡rio responsÃ¡vel pela devoluÃ§Ã£o.")]
     long UsuarioId,
-    [Range(0.01, double.MaxValue, ErrorMessage = "Informe um valor de devolucao maior que zero.")]
+    [Range(0.01, double.MaxValue, ErrorMessage = "Informe um valor de devoluÃ§Ã£o maior que zero.")]
     decimal ValorDevolvido,
-    [Required(ErrorMessage = "Informe a forma da devolucao.")]
+    [Required(ErrorMessage = "Informe a forma da devoluÃ§Ã£o.")]
     string FormaDevolucao,
-    [MinLength(10, ErrorMessage = "Informe uma observacao da devolucao com pelo menos 10 caracteres.")]
+    [Required(ErrorMessage = "Informe uma observaÃ§Ã£o da devoluÃ§Ã£o.")]
+    [MinLength(10, ErrorMessage = "Informe uma observaÃ§Ã£o da devoluÃ§Ã£o com pelo menos 10 caracteres.")]
+    [StringLength(300, ErrorMessage = "A observaÃ§Ã£o da devoluÃ§Ã£o deve ter no mÃ¡ximo 300 caracteres.")]
     string Observacao);
 
 public sealed record FinalizarPedidoRequest(
-    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuário responsável pela finalização.")]
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuÃ¡rio responsÃ¡vel pela finalizaÃ§Ã£o.")]
     long UsuarioId,
+    [StringLength(300, ErrorMessage = "A observaÃ§Ã£o deve ter no mÃ¡ximo 300 caracteres.")]
     string? Observacao,
     bool ReceberSaldo,
     string? FormaPagamento);
-
