@@ -14,9 +14,11 @@ public sealed class LogsController(ILogRepository logRepository) : ControllerBas
         [FromQuery] long? entidadeId,
         [FromQuery] DateOnly? dataInicio,
         [FromQuery] DateOnly? dataFinal,
-        CancellationToken cancellationToken)
+        [FromQuery] int pagina = 1,
+        [FromQuery] int tamanhoPagina = 20,
+        CancellationToken cancellationToken = default)
     {
-        var logs = await logRepository.ListAsync(entidade, entidadeId, dataInicio, dataFinal, cancellationToken);
+        var logs = await logRepository.ListAsync(entidade, entidadeId, dataInicio, dataFinal, pagina, tamanhoPagina, cancellationToken);
         return Ok(logs);
     }
 
