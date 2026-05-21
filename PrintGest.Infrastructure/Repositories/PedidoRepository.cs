@@ -112,7 +112,7 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
     {
         var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
         await GarantirColunaRegistradoEmPagamentos((MySqlConnection)connection, cancellationToken);
-        await GarantirEstruturaCancelamento((MySqlConnection)connection, cancellationToken);
+        await GarantirEstruturaCancelamento((MySqlConnection)connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
 
         await using var command = (MySqlCommand)connection.CreateCommand();
         command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
@@ -399,7 +399,7 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
         var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
         var transaction = (MySqlTransaction?)await unitOfWork.BeginTransactionAsync(cancellationToken);
 
-        await GarantirEstruturaCancelamento((MySqlConnection)connection, cancellationToken);
+        await GarantirEstruturaCancelamento((MySqlConnection)connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
 
         await using var command = (MySqlCommand)connection.CreateCommand();
         command.Transaction = transaction;
@@ -451,7 +451,7 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
         var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
         var transaction = (MySqlTransaction?)await unitOfWork.BeginTransactionAsync(cancellationToken);
 
-        await GarantirEstruturaCancelamento((MySqlConnection)connection, cancellationToken);
+        await GarantirEstruturaCancelamento((MySqlConnection)connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
 
         await using var caixa = (MySqlCommand)connection.CreateCommand();
         caixa.Transaction = transaction;
@@ -862,12 +862,13 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
         await alter.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task GarantirEstruturaCancelamento(MySqlConnection connection, CancellationToken cancellationToken)
+    private static async Task GarantirEstruturaCancelamento(MySqlConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
     {
-        await GarantirColuna(connection, "pedidos", "valor_estornado", "ALTER TABLE pedidos ADD COLUMN valor_estornado DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER motivo_cancelamento;", cancellationToken);
-        await GarantirColuna(connection, "pedidos", "observacao_estorno", "ALTER TABLE pedidos ADD COLUMN observacao_estorno VARCHAR(300) NULL AFTER valor_estornado;", cancellationToken);
+        await GarantirColuna(connection, transaction, "pedidos", "valor_estornado", "ALTER TABLE pedidos ADD COLUMN valor_estornado DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER motivo_cancelamento;", cancellationToken);
+        await GarantirColuna(connection, transaction, "pedidos", "observacao_estorno", "ALTER TABLE pedidos ADD COLUMN observacao_estorno VARCHAR(300) NULL AFTER valor_estornado;", cancellationToken);
 
         await using var tabelaCaixa = connection.CreateCommand();
+        tabelaCaixa.Transaction = transaction;
         tabelaCaixa.CommandText = """
             CREATE TABLE IF NOT EXISTS caixa_movimentacoes (
                 id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -883,12 +884,13 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
             );
             """;
         await tabelaCaixa.ExecuteNonQueryAsync(cancellationToken);
-        await GarantirColuna(connection, "caixa_movimentacoes", "pedido_id", "ALTER TABLE caixa_movimentacoes ADD COLUMN pedido_id BIGINT UNSIGNED NULL AFTER id;", cancellationToken);
+        await GarantirColuna(connection, transaction, "caixa_movimentacoes", "pedido_id", "ALTER TABLE caixa_movimentacoes ADD COLUMN pedido_id BIGINT UNSIGNED NULL AFTER id;", cancellationToken);
     }
 
-    private static async Task GarantirColuna(MySqlConnection connection, string tabela, string coluna, string alterSql, CancellationToken cancellationToken)
+    private static async Task GarantirColuna(MySqlConnection connection, MySqlTransaction? transaction, string tabela, string coluna, string alterSql, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             SELECT COUNT(*)
             FROM INFORMATION_SCHEMA.COLUMNS
@@ -905,6 +907,7 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
         }
 
         await using var alter = connection.CreateCommand();
+        alter.Transaction = transaction;
         alter.CommandText = alterSql;
         await alter.ExecuteNonQueryAsync(cancellationToken);
     }

@@ -187,7 +187,7 @@ public sealed class FinanceiroRepository(IUnitOfWork unitOfWork) : IFinanceiroRe
             var valor = reader.GetDecimal("valor");
             var status = reader.GetString("status");
             var categoria = reader.GetString("categoria");
-            categorias.Add(categoria);
+            categorias.Add(NormalizarCategoriaExibicao(categoria));
             totalMes += valor;
             if (status == "PAGO") pagas += valor; else naoPagas += valor;
             if (vencimento == hoje && status != "PAGO")
@@ -201,7 +201,7 @@ public sealed class FinanceiroRepository(IUnitOfWork unitOfWork) : IFinanceiroRe
                 reader.GetString("grupo_despesa_id"),
                 reader.GetInt32("numero_parcela"),
                 reader.GetInt32("total_parcelas"),
-                categoria,
+                NormalizarCategoriaExibicao(categoria),
                 reader.GetString("descricao"),
                 valor,
                 reader.GetDecimal("valor_total"),
@@ -246,20 +246,22 @@ public sealed class FinanceiroRepository(IUnitOfWork unitOfWork) : IFinanceiroRe
                 command.Transaction = (MySqlTransaction)transaction;
                 command.CommandText = """
                     INSERT INTO despesas
-                        (cadastrado_por_usuario_id, grupo_despesa_id, numero_parcela, total_parcelas, categoria, descricao, valor, valor_total, vencimento, status, observacao)
+                        (cadastrado_por_usuario_id, grupo_despesa_id, numero_parcela, total_parcelas, categoria, descricao, valor, valor_total, vencimento, status, data_pagamento, observacao)
                     VALUES
-                        (@usuarioId, @grupoId, @numeroParcela, @totalParcelas, @categoria, @descricao, @valor, @valorTotal, @vencimento, 'ABERTO', @observacao);
+                        (@usuarioId, @grupoId, @numeroParcela, @totalParcelas, @categoria, @descricao, @valor, @valorTotal, @vencimento, @status, @dataPagamento, @observacao);
                     SELECT LAST_INSERT_ID();
                     """;
                 command.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
                 command.Parameters.AddWithValue("@grupoId", grupoId);
                 command.Parameters.AddWithValue("@numeroParcela", parcela);
                 command.Parameters.AddWithValue("@totalParcelas", totalParcelas);
-                command.Parameters.AddWithValue("@categoria", request.Categoria.Trim());
+                command.Parameters.AddWithValue("@categoria", NormalizarCategoriaExibicao(request.Categoria));
                 command.Parameters.AddWithValue("@descricao", request.Descricao.Trim());
                 command.Parameters.AddWithValue("@valor", valor);
                 command.Parameters.AddWithValue("@valorTotal", request.Valor);
                 command.Parameters.AddWithValue("@vencimento", request.Vencimento.AddMonths(parcela - 1).ToDateTime(TimeOnly.MinValue));
+                command.Parameters.AddWithValue("@status", request.JaPago ? "PAGO" : "ABERTO");
+                command.Parameters.AddWithValue("@dataPagamento", request.JaPago ? DateTime.Today : DBNull.Value);
                 command.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
                 var id = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
                 if (primeiroId == 0) primeiroId = id;
@@ -351,7 +353,7 @@ public sealed class FinanceiroRepository(IUnitOfWork unitOfWork) : IFinanceiroRe
                     WHERE id = @id;
                     """;
                 update.Parameters.AddWithValue("@id", ids[index]);
-                update.Parameters.AddWithValue("@categoria", request.Categoria.Trim());
+                update.Parameters.AddWithValue("@categoria", NormalizarCategoriaExibicao(request.Categoria));
                 update.Parameters.AddWithValue("@descricao", request.Descricao.Trim());
                 update.Parameters.AddWithValue("@valor", valor);
                 update.Parameters.AddWithValue("@valorTotal", request.Valor);
@@ -542,6 +544,14 @@ public sealed class FinanceiroRepository(IUnitOfWork unitOfWork) : IFinanceiroRe
     {
         var ordinal = reader.GetOrdinal(column);
         return reader.IsDBNull(ordinal) ? null : DateOnly.FromDateTime(reader.GetDateTime(ordinal));
+    }
+
+    private static string NormalizarCategoriaExibicao(string value)
+    {
+        var normalized = value.Trim();
+        if (normalized.Length == 0) return normalized;
+        return string.Join(" ", normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(word =>
+            word.Length <= 2 ? word.ToUpperInvariant() : char.ToUpperInvariant(word[0]) + word[1..].ToLowerInvariant()));
     }
 
     private static object ToDb(string? value) => string.IsNullOrWhiteSpace(value) ? DBNull.Value : value.Trim();

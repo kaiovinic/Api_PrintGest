@@ -77,7 +77,7 @@ public sealed class AuthServiceTests
             return Task.FromResult(usuario?.Id == id ? usuario : null);
         }
 
-        public Task<IReadOnlyList<Usuario>> ListAsync(CancellationToken cancellationToken = default)
+        public Task<IReadOnlyList<Usuario>> ListAsync(UsuarioFiltro filtro, CancellationToken cancellationToken = default)
         {
             IReadOnlyList<Usuario> usuarios = usuario is null ? [] : [usuario];
             return Task.FromResult(usuarios);

@@ -9,11 +9,18 @@ namespace PrintGest.Api.Controllers;
 public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork unitOfWork) : ControllerBase
 {
     [HttpGet]
-    public async Task<IActionResult> Listar([FromQuery, Range(2000, 2100, ErrorMessage = "Informe um ano válido.")] int? ano, [FromQuery, Range(1, 12, ErrorMessage = "Informe um mês entre 1 e 12.")] int? mes, [FromQuery] DateOnly? inicio, [FromQuery] DateOnly? fim, [FromQuery] string? status, CancellationToken cancellationToken)
+    public async Task<IActionResult> Listar(
+        [FromQuery, Range(2000, 2100, ErrorMessage = "Informe um ano valido.")] int? ano,
+        [FromQuery, Range(1, 12, ErrorMessage = "Informe um mes entre 1 e 12.")] int? mes,
+        [FromQuery] DateOnly? inicio,
+        [FromQuery] DateOnly? fim,
+        [FromQuery] string? status,
+        [FromQuery] int pagina = 1,
+        [FromQuery] int tamanhoPagina = 10,
+        CancellationToken cancellationToken = default)
     {
-        return Ok(await pedidos.ListAsync(new PedidoFiltro(ano, mes, inicio, fim, status), cancellationToken));
+        return Ok(await pedidos.ListAsync(new PedidoFiltro(ano, mes, inicio, fim, status, pagina, tamanhoPagina), cancellationToken));
     }
-
     [HttpGet("recentes")]
     public async Task<IActionResult> ListarRecentes(CancellationToken cancellationToken)
     {
@@ -82,18 +89,18 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
                 var estado = await pedidos.ObterEstadoPedidoAsync(id, cancellationToken);
                 if (estado is null)
                 {
-                    return NotFound(new { mensagem = "Pedido ou orçamento não encontrado." });
+                    return NotFound(new { mensagem = "Pedido ou orcamento nao encontrado." });
                 }
 
                 if (estado.Value.Tipo == "PEDIDO")
                 {
                     return BadRequest(new
                     {
-                        mensagem = "Não é permitido transformar um pedido em orçamento. Se o cliente desistiu, use a opção Cancelar."
+                        mensagem = "Nao e permitido transformar um pedido em orcamento. Se o cliente desistiu, use a opcao Cancelar."
                     });
                 }
 
-                return BadRequest(new { mensagem = $"Não foi possível editar este orçamento porque ele está com status {FormatarStatus(estado.Value.Status)}." });
+                return BadRequest(new { mensagem = $"Nao foi possivel editar este orcamento porque ele esta com status {FormatarStatus(estado.Value.Status)}." });
             }
 
             await unitOfWork.CommitAsync(cancellationToken);
@@ -151,7 +158,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             }
 
             await unitOfWork.CommitAsync(cancellationToken);
-            return Ok(new { mensagem = "Orçamento convertido em pedido." });
+            return Ok(new { mensagem = "Orcamento convertido em pedido." });
         }
         catch
         {
@@ -170,7 +177,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             if (estado is null)
             {
                 await unitOfWork.RollbackAsync(cancellationToken);
-                return NotFound(new { mensagem = "Pedido ou orçamento não encontrado." });
+                return NotFound(new { mensagem = "Pedido ou orcamento nao encontrado." });
             }
 
             var (_, statusAtual, valorPago, _) = estado.Value;
@@ -184,13 +191,13 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             if (statusAtual == "CANCELADO")
             {
                 await unitOfWork.RollbackAsync(cancellationToken);
-                return BadRequest(new { mensagem = "Este registro já está cancelado." });
+                return BadRequest(new { mensagem = "Este registro ja esta cancelado." });
             }
 
             if (statusAtual == "FINALIZADO")
             {
                 await unitOfWork.RollbackAsync(cancellationToken);
-                return BadRequest(new { mensagem = "Não é possível cancelar um pedido finalizado." });
+                return BadRequest(new { mensagem = "Nao e possivel cancelar um pedido finalizado." });
             }
 
             if (request.ValorDevolvido < 0 || request.ValorDevolvido > valorPago)
@@ -202,13 +209,13 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             if (request.ValorDevolvido > 0 && string.IsNullOrWhiteSpace(request.FormaDevolucao))
             {
                 await unitOfWork.RollbackAsync(cancellationToken);
-                return BadRequest(new { mensagem = "Informe a forma da devolução ao cliente." });
+                return BadRequest(new { mensagem = "Informe a forma da devolucao ao cliente." });
             }
 
             if (request.ValorDevolvido > 0 && request.ValorDevolvido < valorPago && string.IsNullOrWhiteSpace(request.ObservacaoEstorno))
             {
                 await unitOfWork.RollbackAsync(cancellationToken);
-                return BadRequest(new { mensagem = "Informe uma observação explicando a devolução parcial." });
+                return BadRequest(new { mensagem = "Informe uma observacao explicando a devolucao parcial." });
             }
 
             var dto = new AlterarStatusPedidoDto(
@@ -320,7 +327,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             if (estado is null)
             {
                 await unitOfWork.RollbackAsync(cancellationToken);
-                return NotFound(new { mensagem = "Pedido não encontrado." });
+                return NotFound(new { mensagem = "Pedido nao encontrado." });
             }
 
             var (tipoAtual, statusAtual, _, saldoDevedor) = estado.Value;
@@ -328,19 +335,19 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             if (tipoAtual != "PEDIDO")
             {
                 await unitOfWork.RollbackAsync(cancellationToken);
-                return BadRequest(new { mensagem = "Somente pedidos podem ser finalizados. Orçamentos devem ser convertidos em pedido primeiro." });
+                return BadRequest(new { mensagem = "Somente pedidos podem ser finalizados. Orcamentos devem ser convertidos em pedido primeiro." });
             }
 
             if (statusAtual == "CANCELADO")
             {
                 await unitOfWork.RollbackAsync(cancellationToken);
-                return BadRequest(new { mensagem = "Não é possível finalizar um pedido cancelado." });
+                return BadRequest(new { mensagem = "Nao e possivel finalizar um pedido cancelado." });
             }
 
             if (statusAtual == "FINALIZADO")
             {
                 await unitOfWork.RollbackAsync(cancellationToken);
-                return BadRequest(new { mensagem = "Este pedido já está finalizado." });
+                return BadRequest(new { mensagem = "Este pedido ja esta finalizado." });
             }
 
             if (saldoDevedor > 0)
@@ -348,7 +355,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
                 if (!request.ReceberSaldo)
                 {
                     await unitOfWork.RollbackAsync(cancellationToken);
-                    return BadRequest(new { mensagem = "Não é possível finalizar pedido com saldo devedor em aberto." });
+                    return BadRequest(new { mensagem = "Nao e possivel finalizar pedido com saldo devedor em aberto." });
                 }
 
                 if (string.IsNullOrWhiteSpace(request.FormaPagamento))
@@ -386,7 +393,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
     {
         return status switch
         {
-            "ORCADO" => "orçado",
+            "ORCADO" => "orcado",
             "ABERTO" => "aberto",
             "FINALIZADO" => "finalizado",
             "CANCELADO" => "cancelado",
@@ -429,102 +436,103 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
 }
 
 public sealed record PedidoRequest(
-    [Required(ErrorMessage = "Informe o número do pedido ou orçamento.")]
-    [StringLength(30, ErrorMessage = "O número deve ter no máximo 30 caracteres.")]
+    [Required(ErrorMessage = "Informe o numero do pedido ou orcamento.")]
+    [StringLength(30, ErrorMessage = "O numero deve ter no maximo 30 caracteres.")]
     string Numero,
-    [Range(0, long.MaxValue, ErrorMessage = "Informe um cliente válido.")]
+    [Range(0, long.MaxValue, ErrorMessage = "Informe um cliente valido.")]
     long ClienteId,
     [Required(ErrorMessage = "Informe o nome do cliente.")]
-    [StringLength(120, ErrorMessage = "O nome do cliente deve ter no máximo 120 caracteres.")]
+    [StringLength(120, ErrorMessage = "O nome do cliente deve ter no maximo 120 caracteres.")]
     string ClienteNome,
-    [StringLength(120, ErrorMessage = "A empresa deve ter no máximo 120 caracteres.")]
+    [StringLength(120, ErrorMessage = "A empresa deve ter no maximo 120 caracteres.")]
     string? Empresa,
-    [StringLength(20, ErrorMessage = "O CPF/CNPJ deve ter no máximo 20 caracteres.")]
+    [StringLength(20, ErrorMessage = "O CPF/CNPJ deve ter no maximo 20 caracteres.")]
     string? CpfCnpj,
-    [StringLength(20, ErrorMessage = "O telefone deve ter no máximo 20 caracteres.")]
+    [StringLength(20, ErrorMessage = "O telefone deve ter no maximo 20 caracteres.")]
     string? Telefone,
-    [StringLength(200, ErrorMessage = "O endereço deve ter no máximo 200 caracteres.")]
+    [StringLength(200, ErrorMessage = "O endereco deve ter no maximo 200 caracteres.")]
     string? Endereco,
-    [StringLength(80, ErrorMessage = "A cidade deve ter no máximo 80 caracteres.")]
+    [StringLength(80, ErrorMessage = "A cidade deve ter no maximo 80 caracteres.")]
     string? Cidade,
-    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuário responsável pelo pedido.")]
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuario responsavel pelo pedido.")]
     long UsuarioId,
     DateOnly DataPedido,
     DateOnly? DataEntrega,
-    [StringLength(120, ErrorMessage = "O vendedor deve ter no máximo 120 caracteres.")]
+    [StringLength(120, ErrorMessage = "O vendedor deve ter no maximo 120 caracteres.")]
     string? Vendedor,
-    [StringLength(30, ErrorMessage = "A forma de pagamento deve ter no máximo 30 caracteres.")]
+    [StringLength(30, ErrorMessage = "A forma de pagamento deve ter no maximo 30 caracteres.")]
     string? FormaPagamento,
-    [StringLength(30, ErrorMessage = "A condição de pagamento deve ter no máximo 30 caracteres.")]
+    [StringLength(30, ErrorMessage = "A condicao de pagamento deve ter no maximo 30 caracteres.")]
     string? CondicaoPagamento,
-    [StringLength(500, ErrorMessage = "A descrição da frente deve ter no máximo 500 caracteres.")]
+    [StringLength(500, ErrorMessage = "A descricao da frente deve ter no maximo 500 caracteres.")]
     string? Frente,
-    [StringLength(500, ErrorMessage = "A descrição do fundo deve ter no máximo 500 caracteres.")]
+    [StringLength(500, ErrorMessage = "A descricao do fundo deve ter no maximo 500 caracteres.")]
     string? Fundo,
-    [StringLength(300, ErrorMessage = "A observação deve ter no máximo 300 caracteres.")]
+    [StringLength(300, ErrorMessage = "A observacao deve ter no maximo 300 caracteres.")]
     string? Observacao,
-    [StringLength(300, ErrorMessage = "Outros itens deve ter no máximo 300 caracteres.")]
+    [StringLength(300, ErrorMessage = "Outros itens deve ter no maximo 300 caracteres.")]
     string? OutrosItens,
     [Range(0.01, double.MaxValue, ErrorMessage = "O total do pedido deve ser maior que zero.")]
     decimal Total,
-    [Range(0, double.MaxValue, ErrorMessage = "O valor pago não pode ser negativo.")]
+    [Range(0, double.MaxValue, ErrorMessage = "O valor pago nao pode ser negativo.")]
     decimal ValorPago,
     [Required(ErrorMessage = "Informe ao menos um item do pedido.")]
     [MinLength(1, ErrorMessage = "Informe ao menos um item do pedido.")]
     IReadOnlyList<ItemPedidoRequest> Itens);
 
 public sealed record ItemPedidoRequest(
-    [Required(ErrorMessage = "Informe a descrição do item.")]
-    [StringLength(200, ErrorMessage = "A descrição do item deve ter no máximo 200 caracteres.")]
+    [Required(ErrorMessage = "Informe a descricao do item.")]
+    [StringLength(200, ErrorMessage = "A descricao do item deve ter no maximo 200 caracteres.")]
     string Descricao,
-    [StringLength(20, ErrorMessage = "O tamanho deve ter no máximo 20 caracteres.")]
+    [StringLength(20, ErrorMessage = "O tamanho deve ter no maximo 20 caracteres.")]
     string? Tamanho,
     [Range(1, int.MaxValue, ErrorMessage = "A quantidade do item deve ser maior que zero.")]
     int Quantidade,
-    [Range(0.01, double.MaxValue, ErrorMessage = "O valor unitário deve ser maior que zero.")]
+    [Range(0.01, double.MaxValue, ErrorMessage = "O valor unitario deve ser maior que zero.")]
     decimal ValorUnitario,
     [Range(0.01, double.MaxValue, ErrorMessage = "O valor total do item deve ser maior que zero.")]
     decimal ValorTotal);
 
 public sealed record ConverterPedidoRequest(
-    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuário responsável pela conversão.")]
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuario responsavel pela conversao.")]
     long UsuarioId,
     [Required(ErrorMessage = "Informe a forma de pagamento.")]
     string FormaPagamento,
-    [Required(ErrorMessage = "Informe a condição de pagamento.")]
+    [Required(ErrorMessage = "Informe a condicao de pagamento.")]
     string CondicaoPagamento,
     [Range(0.01, double.MaxValue, ErrorMessage = "Informe um valor de entrada maior que zero.")]
     decimal ValorEntrada);
 
 public sealed record AlterarStatusPedidoRequest(
-    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuário responsável pela alteração.")]
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuario responsavel pela alteracao.")]
     long UsuarioId,
     [Required(ErrorMessage = "Informe o motivo do cancelamento.")]
     [MinLength(10, ErrorMessage = "Informe o motivo do cancelamento com pelo menos 10 caracteres.")]
-    [StringLength(300, ErrorMessage = "O motivo do cancelamento deve ter no máximo 300 caracteres.")]
+    [StringLength(300, ErrorMessage = "O motivo do cancelamento deve ter no maximo 300 caracteres.")]
     string? Observacao,
-    [Range(0, double.MaxValue, ErrorMessage = "O valor devolvido não pode ser negativo.")]
+    [Range(0, double.MaxValue, ErrorMessage = "O valor devolvido nao pode ser negativo.")]
     decimal ValorDevolvido,
     string? FormaDevolucao,
-    [StringLength(300, ErrorMessage = "A observação do estorno deve ter no máximo 300 caracteres.")]
+    [StringLength(300, ErrorMessage = "A observacao do estorno deve ter no maximo 300 caracteres.")]
     string? ObservacaoEstorno);
 
 public sealed record EstornarPedidoRequest(
-    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuário responsável pela devolução.")]
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuario responsavel pela devolucao.")]
     long UsuarioId,
-    [Range(0.01, double.MaxValue, ErrorMessage = "Informe um valor de devolução maior que zero.")]
+    [Range(0.01, double.MaxValue, ErrorMessage = "Informe um valor de devolucao maior que zero.")]
     decimal ValorDevolvido,
-    [Required(ErrorMessage = "Informe a forma da devolução.")]
+    [Required(ErrorMessage = "Informe a forma da devolucao.")]
     string FormaDevolucao,
-    [Required(ErrorMessage = "Informe uma observação da devolução.")]
-    [MinLength(10, ErrorMessage = "Informe uma observação da devolução com pelo menos 10 caracteres.")]
-    [StringLength(300, ErrorMessage = "A observação da devolução deve ter no máximo 300 caracteres.")]
+    [Required(ErrorMessage = "Informe uma observacao da devolucao.")]
+    [MinLength(10, ErrorMessage = "Informe uma observacao da devolucao com pelo menos 10 caracteres.")]
+    [StringLength(300, ErrorMessage = "A observacao da devolucao deve ter no maximo 300 caracteres.")]
     string Observacao);
 
 public sealed record FinalizarPedidoRequest(
-    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuário responsável pela finalização.")]
+    [Range(1, long.MaxValue, ErrorMessage = "Informe o usuario responsavel pela finalizacao.")]
     long UsuarioId,
-    [StringLength(300, ErrorMessage = "A observação deve ter no máximo 300 caracteres.")]
+    [StringLength(300, ErrorMessage = "A observacao deve ter no maximo 300 caracteres.")]
     string? Observacao,
     bool ReceberSaldo,
     string? FormaPagamento);
+

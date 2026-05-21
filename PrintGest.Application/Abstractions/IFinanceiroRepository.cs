@@ -111,7 +111,8 @@ public sealed record FinanceiroDespesaRequest(
     [Range(1, 120, ErrorMessage = "Informe uma quantidade de parcelas entre 1 e 120.")]
     int QuantidadeParcelas,
     [StringLength(300, ErrorMessage = "A observacao deve ter no maximo 300 caracteres.")]
-    string? Observacao);
+    string? Observacao,
+    bool JaPago = false);
 
 public sealed record FinanceiroDespesaAtualizarRequest(
     [Required(ErrorMessage = "Informe a categoria da despesa.")]

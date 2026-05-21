@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using Microsoft.AspNetCore.Mvc;
 using PrintGest.Application.Abstractions;
 using PrintGest.Domain.Entities;
@@ -10,9 +11,9 @@ namespace PrintGest.Api.Controllers;
 public sealed class UsuariosController(IUsuarioRepository usuarios) : ControllerBase
 {
     [HttpGet]
-    public async Task<IActionResult> Listar(CancellationToken cancellationToken)
+    public async Task<IActionResult> Listar([FromQuery] string? nome, [FromQuery] string? email, [FromQuery] string? perfil, [FromQuery] string? status, CancellationToken cancellationToken)
     {
-        var lista = await usuarios.ListAsync(cancellationToken);
+        var lista = await usuarios.ListAsync(new UsuarioFiltro(nome, email, perfil, status), cancellationToken);
         return Ok(lista.Select(usuario => new
         {
             usuario.Id,
@@ -99,8 +100,14 @@ public sealed class UsuariosController(IUsuarioRepository usuarios) : Controller
 }
 
 public sealed record UsuarioRequest(
+    [Required(ErrorMessage = "Informe o nome do usuario.")]
+    [StringLength(120, ErrorMessage = "O nome deve ter no maximo 120 caracteres.")]
     string Nome,
+    [Required(ErrorMessage = "Informe o email do usuario.")]
+    [EmailAddress(ErrorMessage = "Informe um email valido.")]
     string Email,
+    [StringLength(30, ErrorMessage = "O telefone deve ter no maximo 30 caracteres.")]
     string? Telefone,
+    [Required(ErrorMessage = "Informe o perfil do usuario.")]
     string Perfil);
 

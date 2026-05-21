@@ -48,8 +48,15 @@ public sealed class EstoqueController(IEstoqueRepository estoque) : ControllerBa
             return BadRequest(new { mensagem = "Informe o custo unitario para registrar entrada de estoque." });
         }
 
-        await estoque.RegistrarMovimentacaoAsync(request, cancellationToken);
-        return Ok(new { mensagem = "Movimentacao registrada com sucesso." });
+        try
+        {
+            await estoque.RegistrarMovimentacaoAsync(request, cancellationToken);
+            return Ok(new { mensagem = "Movimentacao registrada com sucesso." });
+        }
+        catch (InvalidOperationException exception)
+        {
+            return BadRequest(new { mensagem = exception.Message });
+        }
     }
 
     [HttpGet("movimentacoes")]

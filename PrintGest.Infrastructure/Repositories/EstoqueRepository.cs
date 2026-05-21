@@ -141,6 +141,19 @@ public sealed class EstoqueRepository(IUnitOfWork unitOfWork) : IEstoqueReposito
 
         try
         {
+            if (request.PedidoId is not null)
+            {
+                await using var pedido = (MySqlCommand)connection.CreateCommand();
+                pedido.Transaction = (MySqlTransaction)transaction;
+                pedido.CommandText = "SELECT COUNT(*) FROM pedidos WHERE id = @pedidoId;";
+                pedido.Parameters.AddWithValue("@pedidoId", request.PedidoId.Value);
+                var pedidoExiste = Convert.ToInt32(await pedido.ExecuteScalarAsync(cancellationToken)) > 0;
+                if (!pedidoExiste)
+                {
+                    throw new InvalidOperationException("Pedido vinculado nao encontrado. Informe um pedido existente ou deixe o campo vazio.");
+                }
+            }
+
             await using var insert = (MySqlCommand)connection.CreateCommand();
             insert.Transaction = (MySqlTransaction)transaction;
             insert.CommandText = """

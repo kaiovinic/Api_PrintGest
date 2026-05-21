@@ -42,7 +42,7 @@ public sealed class UsuarioRepository(IUnitOfWork unitOfWork) : IUsuarioReposito
         return await reader.ReadAsync(cancellationToken) ? Map(reader) : null;
     }
 
-    public async Task<IReadOnlyList<Usuario>> ListAsync(CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<Usuario>> ListAsync(UsuarioFiltro filtro, CancellationToken cancellationToken = default)
     {
         var usuarios = new List<Usuario>();
         var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
@@ -51,8 +51,16 @@ public sealed class UsuarioRepository(IUnitOfWork unitOfWork) : IUsuarioReposito
         command.CommandText = """
             SELECT id, nome, email, telefone, senha_hash, perfil, status, deve_trocar_senha
             FROM usuarios
+            WHERE (@nome IS NULL OR nome LIKE CONCAT('%', @nome, '%'))
+              AND (@email IS NULL OR email LIKE CONCAT('%', @email, '%'))
+              AND (@perfil IS NULL OR perfil = @perfil)
+              AND (@status IS NULL OR status = @status)
             ORDER BY nome;
             """;
+        command.Parameters.AddWithValue("@nome", ToDb(filtro.Nome));
+        command.Parameters.AddWithValue("@email", ToDb(filtro.Email));
+        command.Parameters.AddWithValue("@perfil", ToDb(NormalizarEnum(filtro.Perfil)));
+        command.Parameters.AddWithValue("@status", ToDb(NormalizarEnum(filtro.Status)));
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -131,6 +139,10 @@ public sealed class UsuarioRepository(IUnitOfWork unitOfWork) : IUsuarioReposito
 
         return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
+
+    private static string? NormalizarEnum(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().ToUpperInvariant();
+
+    private static object ToDb(string? value) => string.IsNullOrWhiteSpace(value) ? DBNull.Value : value.Trim();
 
     private static Usuario Map(MySqlDataReader reader)
     {
