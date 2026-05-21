@@ -72,10 +72,35 @@ public sealed class AuthServiceTests
             return Task.FromResult(usuario?.Email == email ? usuario : null);
         }
 
+        public Task<Usuario?> GetByIdAsync(long id, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(usuario?.Id == id ? usuario : null);
+        }
+
         public Task<IReadOnlyList<Usuario>> ListAsync(CancellationToken cancellationToken = default)
         {
             IReadOnlyList<Usuario> usuarios = usuario is null ? [] : [usuario];
             return Task.FromResult(usuarios);
+        }
+
+        public Task<long> CreateAsync(Usuario usuario, CancellationToken cancellationToken = default)
+        {
+            throw new NotImplementedException();
+        }
+
+        public Task<bool> UpdateAsync(Usuario usuario, CancellationToken cancellationToken = default)
+        {
+            throw new NotImplementedException();
+        }
+
+        public Task<bool> UpdateStatusAsync(long id, StatusUsuario status, CancellationToken cancellationToken = default)
+        {
+            throw new NotImplementedException();
+        }
+
+        public Task<bool> UpdatePasswordAsync(long id, string hashSenha, bool deveTrocarSenha, CancellationToken cancellationToken = default)
+        {
+            throw new NotImplementedException();
         }
     }
 }

@@ -1,19 +1,20 @@
-﻿using MySqlConnector;
+using System.Data.Common;
+using MySqlConnector;
 using PrintGest.Application.Abstractions;
 using PrintGest.Infrastructure.Data;
 
 namespace PrintGest.Infrastructure.Repositories;
 
-public sealed class CaixaRepository(MySqlConnectionFactory factory) : ICaixaRepository
+public sealed class CaixaRepository(IUnitOfWork unitOfWork) : ICaixaRepository
 {
     public async Task<CaixaResumoDto> ObterResumoAsync(DateOnly? inicio, DateOnly? fim, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaCaixa(connection, cancellationToken);
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaCaixa(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
         var periodo = ResolverPeriodo(inicio, fim);
 
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             SELECT
                 COALESCE(SUM(CASE WHEN tipo = 'ENTRADA' THEN valor ELSE 0 END), 0) AS entradas,
@@ -50,13 +51,13 @@ public sealed class CaixaRepository(MySqlConnectionFactory factory) : ICaixaRepo
 
     public async Task<ResultadoPaginado<CaixaMovimentacaoDto>> ListarMovimentacoesAsync(DateOnly? inicio, DateOnly? fim, int pagina, int tamanhoPagina, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaCaixa(connection, cancellationToken);
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaCaixa(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
         var periodo = ResolverPeriodo(inicio, fim);
         var paging = NormalizarPaginacao(pagina, tamanhoPagina);
 
-        await using var totalCommand = connection.CreateCommand();
+        await using var totalCommand = (MySqlCommand)connection.CreateCommand();
+        totalCommand.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         totalCommand.CommandText = """
             SELECT COUNT(*)
             FROM (
@@ -70,7 +71,8 @@ public sealed class CaixaRepository(MySqlConnectionFactory factory) : ICaixaRepo
         totalCommand.Parameters.AddWithValue("@fim", periodo.Fim);
         var total = Convert.ToInt32(await totalCommand.ExecuteScalarAsync(cancellationToken));
 
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             SELECT *
             FROM (
@@ -135,16 +137,16 @@ public sealed class CaixaRepository(MySqlConnectionFactory factory) : ICaixaRepo
 
     public async Task<long> CriarMovimentacaoAsync(CaixaMovimentacaoRequest request, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaCaixa(connection, cancellationToken);
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaCaixa(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
         var tipo = request.Tipo.ToUpperInvariant();
         if (tipo == "ENTRADA" && request.PedidoId is not null)
         {
-            return await RegistrarPagamentoPedido(connection, request, cancellationToken);
+            return await RegistrarPagamentoPedido(unitOfWork, request, cancellationToken);
         }
 
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             INSERT INTO caixa_movimentacoes
                 (tipo, forma_pagamento, categoria, descricao, valor, usuario_id, observacao)
@@ -162,66 +164,94 @@ public sealed class CaixaRepository(MySqlConnectionFactory factory) : ICaixaRepo
         return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
     }
 
-    private static async Task<long> RegistrarPagamentoPedido(MySqlConnection connection, CaixaMovimentacaoRequest request, CancellationToken cancellationToken)
+    private static async Task<long> RegistrarPagamentoPedido(IUnitOfWork unitOfWork, CaixaMovimentacaoRequest request, CancellationToken cancellationToken)
     {
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        await using var consulta = connection.CreateCommand();
-        consulta.Transaction = transaction;
-        consulta.CommandText = """
-            SELECT tipo, status, valor_pago, saldo_devedor
-            FROM pedidos
-            WHERE id = @pedidoId
-            LIMIT 1
-            FOR UPDATE;
-            """;
-        consulta.Parameters.AddWithValue("@pedidoId", request.PedidoId);
+        var transacaoCriada = false;
+        var transaction = unitOfWork.Transaction;
+        if (transaction == null)
+        {
+            transaction = await unitOfWork.BeginTransactionAsync(cancellationToken);
+            transacaoCriada = true;
+        }
 
-        await using var reader = await consulta.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken)) throw new InvalidOperationException("Pedido nao encontrado.");
-        var tipoPedido = reader.GetString("tipo");
-        var statusPedido = reader.GetString("status");
-        var valorPago = reader.GetDecimal("valor_pago");
-        var saldoDevedor = reader.GetDecimal("saldo_devedor");
-        await reader.DisposeAsync();
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
 
-        if (tipoPedido != "PEDIDO") throw new InvalidOperationException("Somente pedidos podem receber pagamento no caixa.");
-        if (statusPedido is "CANCELADO" or "FINALIZADO") throw new InvalidOperationException("Nao e possivel registrar pagamento para pedido cancelado ou finalizado.");
-        if (request.Valor > saldoDevedor) throw new InvalidOperationException("O valor informado e maior que o saldo devedor do pedido.");
+        try
+        {
+            await using var consulta = (MySqlCommand)connection.CreateCommand();
+            consulta.Transaction = (MySqlTransaction)transaction;
+            consulta.CommandText = """
+                SELECT tipo, status, valor_pago, saldo_devedor
+                FROM pedidos
+                WHERE id = @pedidoId
+                LIMIT 1
+                FOR UPDATE;
+                """;
+            consulta.Parameters.AddWithValue("@pedidoId", request.PedidoId);
 
-        await using var pagamento = connection.CreateCommand();
-        pagamento.Transaction = transaction;
-        pagamento.CommandText = """
-            INSERT INTO pagamentos (pedido_id, registrado_por_usuario_id, forma_pagamento, condicao_pagamento, valor_total, observacao)
-            VALUES (@pedidoId, @usuarioId, @formaPagamento, 'PAGAMENTO_NO_PEDIDO', @valorTotal, @observacao);
-            SELECT LAST_INSERT_ID();
-            """;
-        pagamento.Parameters.AddWithValue("@pedidoId", request.PedidoId);
-        pagamento.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
-        pagamento.Parameters.AddWithValue("@formaPagamento", NormalizarFormaPagamento(request.FormaPagamento));
-        pagamento.Parameters.AddWithValue("@valorTotal", request.Valor);
-        pagamento.Parameters.AddWithValue("@observacao", ToDb(request.Observacao ?? request.Descricao));
-        var id = Convert.ToInt64(await pagamento.ExecuteScalarAsync(cancellationToken));
+            decimal valorPago;
+            decimal saldoDevedor;
+            await using (var reader = await consulta.ExecuteReaderAsync(cancellationToken))
+            {
+                if (!await reader.ReadAsync(cancellationToken)) throw new InvalidOperationException("Pedido nao encontrado.");
+                var tipoPedido = reader.GetString("tipo");
+                var statusPedido = reader.GetString("status");
+                valorPago = reader.GetDecimal("valor_pago");
+                saldoDevedor = reader.GetDecimal("saldo_devedor");
 
-        await using var pedido = connection.CreateCommand();
-        pedido.Transaction = transaction;
-        pedido.CommandText = """
-            UPDATE pedidos
-            SET valor_pago = @valorPago,
-                saldo_devedor = @saldoDevedor
-            WHERE id = @pedidoId;
-            """;
-        pedido.Parameters.AddWithValue("@pedidoId", request.PedidoId);
-        pedido.Parameters.AddWithValue("@valorPago", valorPago + request.Valor);
-        pedido.Parameters.AddWithValue("@saldoDevedor", saldoDevedor - request.Valor);
-        await pedido.ExecuteNonQueryAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return id;
+                if (tipoPedido != "PEDIDO") throw new InvalidOperationException("Somente pedidos podem receber pagamento no caixa.");
+                if (statusPedido is "CANCELADO" or "FINALIZADO") throw new InvalidOperationException("Nao e possivel registrar pagamento para pedido cancelado ou finalizado.");
+                if (request.Valor > saldoDevedor) throw new InvalidOperationException("O valor informado e maior que o saldo devedor do pedido.");
+            }
+
+            await using var pagamento = (MySqlCommand)connection.CreateCommand();
+            pagamento.Transaction = (MySqlTransaction)transaction;
+            pagamento.CommandText = """
+                INSERT INTO pagamentos (pedido_id, registrado_por_usuario_id, forma_pagamento, condicao_pagamento, valor_total, observacao)
+                VALUES (@pedidoId, @usuarioId, @formaPagamento, 'PAGAMENTO_NO_PEDIDO', @valorTotal, @observacao);
+                SELECT LAST_INSERT_ID();
+                """;
+            pagamento.Parameters.AddWithValue("@pedidoId", request.PedidoId);
+            pagamento.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
+            pagamento.Parameters.AddWithValue("@formaPagamento", NormalizarFormaPagamento(request.FormaPagamento));
+            pagamento.Parameters.AddWithValue("@valorTotal", request.Valor);
+            pagamento.Parameters.AddWithValue("@observacao", ToDb(request.Observacao ?? request.Descricao));
+            var id = Convert.ToInt64(await pagamento.ExecuteScalarAsync(cancellationToken));
+
+            await using var pedido = (MySqlCommand)connection.CreateCommand();
+            pedido.Transaction = (MySqlTransaction)transaction;
+            pedido.CommandText = """
+                UPDATE pedidos
+                SET valor_pago = @valorPago,
+                    saldo_devedor = @saldoDevedor
+                WHERE id = @pedidoId;
+                """;
+            pedido.Parameters.AddWithValue("@pedidoId", request.PedidoId);
+            pedido.Parameters.AddWithValue("@valorPago", valorPago + request.Valor);
+            pedido.Parameters.AddWithValue("@saldoDevedor", saldoDevedor - request.Valor);
+            await pedido.ExecuteNonQueryAsync(cancellationToken);
+
+            if (transacaoCriada)
+            {
+                await unitOfWork.CommitAsync(cancellationToken);
+            }
+            return id;
+        }
+        catch
+        {
+            if (transacaoCriada)
+            {
+                await unitOfWork.RollbackAsync(cancellationToken);
+            }
+            throw;
+        }
     }
 
-    private static async Task GarantirEstruturaCaixa(MySqlConnection connection, CancellationToken cancellationToken)
+    private static async Task GarantirEstruturaCaixa(DbConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
     {
-        await GarantirColunaRegistradoEmPagamentos(connection, cancellationToken);
-        await using var command = connection.CreateCommand();
+        await GarantirColunaRegistradoEmPagamentos(connection, transaction, cancellationToken);
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             CREATE TABLE IF NOT EXISTS caixa_movimentacoes (
                 id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -238,17 +268,18 @@ public sealed class CaixaRepository(MySqlConnectionFactory factory) : ICaixaRepo
             );
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
-        await GarantirColuna(connection, "caixa_movimentacoes", "pedido_id", "ALTER TABLE caixa_movimentacoes ADD COLUMN pedido_id BIGINT UNSIGNED NULL AFTER id;", cancellationToken);
+        await GarantirColuna(connection, transaction, "caixa_movimentacoes", "pedido_id", "ALTER TABLE caixa_movimentacoes ADD COLUMN pedido_id BIGINT UNSIGNED NULL AFTER id;", cancellationToken);
     }
 
-    private static async Task GarantirColunaRegistradoEmPagamentos(MySqlConnection connection, CancellationToken cancellationToken)
+    private static async Task GarantirColunaRegistradoEmPagamentos(DbConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
     {
-        await GarantirColuna(connection, "pagamentos", "registrado_em", "ALTER TABLE pagamentos ADD COLUMN registrado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;", cancellationToken);
+        await GarantirColuna(connection, transaction, "pagamentos", "registrado_em", "ALTER TABLE pagamentos ADD COLUMN registrado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;", cancellationToken);
     }
 
-    private static async Task GarantirColuna(MySqlConnection connection, string tabela, string coluna, string alterSql, CancellationToken cancellationToken)
+    private static async Task GarantirColuna(DbConnection connection, MySqlTransaction? transaction, string tabela, string coluna, string alterSql, CancellationToken cancellationToken)
     {
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             SELECT COUNT(*)
             FROM INFORMATION_SCHEMA.COLUMNS
@@ -260,7 +291,8 @@ public sealed class CaixaRepository(MySqlConnectionFactory factory) : ICaixaRepo
         command.Parameters.AddWithValue("@coluna", coluna);
         var existe = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)) > 0;
         if (existe) return;
-        await using var alter = connection.CreateCommand();
+        await using var alter = (MySqlCommand)connection.CreateCommand();
+        alter.Transaction = transaction;
         alter.CommandText = alterSql;
         try { await alter.ExecuteNonQueryAsync(cancellationToken); }
         catch (MySqlException exception) when (exception.Number == 1060) { }

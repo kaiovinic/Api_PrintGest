@@ -1,21 +1,22 @@
-﻿using MySqlConnector;
+using System.Data.Common;
+using MySqlConnector;
 using PrintGest.Application.Abstractions;
 using PrintGest.Infrastructure.Data;
 
 namespace PrintGest.Infrastructure.Repositories;
 
-public sealed class EstoqueRepository(MySqlConnectionFactory factory) : IEstoqueRepository
+public sealed class EstoqueRepository(IUnitOfWork unitOfWork) : IEstoqueRepository
 {
     public async Task<ResultadoPaginado<ProdutoEstoqueDto>> ListarProdutosAsync(int pagina, int tamanhoPagina, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaEstoque(connection, cancellationToken);
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaEstoque(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
         var paging = NormalizarPaginacao(pagina, tamanhoPagina);
 
-        var total = await ContarAsync(connection, "produtos_estoque", cancellationToken);
+        var total = await ContarAsync(connection, (MySqlTransaction?)unitOfWork.Transaction, "produtos_estoque", cancellationToken);
         var produtos = new List<ProdutoEstoqueDto>();
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             SELECT id, nome, categoria, tamanho, unidade, quantidade_atual, estoque_minimo,
                    custo_unitario, fornecedor, observacao, ativo
@@ -51,10 +52,10 @@ public sealed class EstoqueRepository(MySqlConnectionFactory factory) : IEstoque
 
     public async Task<long> CriarProdutoAsync(ProdutoEstoqueRequest request, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaEstoque(connection, cancellationToken);
-        await using var command = connection.CreateCommand();
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaEstoque(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             INSERT INTO produtos_estoque
                 (nome, categoria, tamanho, unidade, quantidade_atual, estoque_minimo, custo_unitario, fornecedor, observacao)
@@ -68,10 +69,10 @@ public sealed class EstoqueRepository(MySqlConnectionFactory factory) : IEstoque
 
     public async Task<bool> EditarProdutoAsync(long id, ProdutoEstoqueRequest request, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaEstoque(connection, cancellationToken);
-        await using var command = connection.CreateCommand();
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaEstoque(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             UPDATE produtos_estoque
             SET nome = @nome,
@@ -90,10 +91,10 @@ public sealed class EstoqueRepository(MySqlConnectionFactory factory) : IEstoque
 
     public async Task<IReadOnlyList<CategoriaEstoqueDto>> ListarCategoriasAsync(CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaEstoque(connection, cancellationToken);
-        await using var command = connection.CreateCommand();
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaEstoque(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             SELECT nome
             FROM categorias_estoque
@@ -112,10 +113,10 @@ public sealed class EstoqueRepository(MySqlConnectionFactory factory) : IEstoque
 
     public async Task CriarCategoriaAsync(CategoriaEstoqueRequest request, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaEstoque(connection, cancellationToken);
-        await using var command = connection.CreateCommand();
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaEstoque(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             INSERT INTO categorias_estoque (nome)
             VALUES (@nome)
@@ -127,57 +128,77 @@ public sealed class EstoqueRepository(MySqlConnectionFactory factory) : IEstoque
 
     public async Task RegistrarMovimentacaoAsync(MovimentacaoEstoqueRequest request, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaEstoque(connection, cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaEstoque(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
 
-        await using var insert = connection.CreateCommand();
-        insert.Transaction = transaction;
-        insert.CommandText = """
-            INSERT INTO movimentacoes_estoque (produto_id, pedido_id, usuario_id, tipo, quantidade, custo_unitario, observacao)
-            VALUES (@produtoId, @pedidoId, @usuarioId, @tipo, @quantidade, @custoUnitario, @observacao);
-            """;
-        insert.Parameters.AddWithValue("@produtoId", request.ProdutoId);
-        insert.Parameters.AddWithValue("@pedidoId", ToDb(request.PedidoId));
-        insert.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
-        insert.Parameters.AddWithValue("@tipo", request.Tipo);
-        insert.Parameters.AddWithValue("@quantidade", request.Quantidade);
-        insert.Parameters.AddWithValue("@custoUnitario", ToDb(request.CustoUnitario));
-        insert.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
-        await insert.ExecuteNonQueryAsync(cancellationToken);
+        var transacaoCriada = false;
+        var transaction = unitOfWork.Transaction;
+        if (transaction == null)
+        {
+            transaction = await unitOfWork.BeginTransactionAsync(cancellationToken);
+            transacaoCriada = true;
+        }
 
-        await using var update = connection.CreateCommand();
-        update.Transaction = transaction;
-        update.CommandText = request.Tipo.ToUpperInvariant() == "ENTRADA"
-            ? """
-              UPDATE produtos_estoque
-              SET custo_unitario =
-                    CASE
-                      WHEN quantidade_atual + @quantidade <= 0 THEN @custoUnitario
-                      ELSE ((quantidade_atual * custo_unitario) + (@quantidade * @custoUnitario)) / (quantidade_atual + @quantidade)
-                    END,
-                  quantidade_atual = quantidade_atual + @quantidade
-              WHERE id = @produtoId;
-              """
-            : "UPDATE produtos_estoque SET quantidade_atual = quantidade_atual - @quantidade WHERE id = @produtoId;";
-        update.Parameters.AddWithValue("@produtoId", request.ProdutoId);
-        update.Parameters.AddWithValue("@quantidade", request.Quantidade);
-        update.Parameters.AddWithValue("@custoUnitario", request.CustoUnitario ?? 0);
-        await update.ExecuteNonQueryAsync(cancellationToken);
+        try
+        {
+            await using var insert = (MySqlCommand)connection.CreateCommand();
+            insert.Transaction = (MySqlTransaction)transaction;
+            insert.CommandText = """
+                INSERT INTO movimentacoes_estoque (produto_id, pedido_id, usuario_id, tipo, quantidade, custo_unitario, observacao)
+                VALUES (@produtoId, @pedidoId, @usuarioId, @tipo, @quantidade, @custoUnitario, @observacao);
+                """;
+            insert.Parameters.AddWithValue("@produtoId", request.ProdutoId);
+            insert.Parameters.AddWithValue("@pedidoId", ToDb(request.PedidoId));
+            insert.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
+            insert.Parameters.AddWithValue("@tipo", request.Tipo);
+            insert.Parameters.AddWithValue("@quantidade", request.Quantidade);
+            insert.Parameters.AddWithValue("@custoUnitario", ToDb(request.CustoUnitario));
+            insert.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
+            await insert.ExecuteNonQueryAsync(cancellationToken);
 
-        await transaction.CommitAsync(cancellationToken);
+            await using var update = (MySqlCommand)connection.CreateCommand();
+            update.Transaction = (MySqlTransaction)transaction;
+            update.CommandText = request.Tipo.ToUpperInvariant() == "ENTRADA"
+                ? """
+                  UPDATE produtos_estoque
+                  SET custo_unitario =
+                        CASE
+                          WHEN quantidade_atual + @quantidade <= 0 THEN @custoUnitario
+                          ELSE ((quantidade_atual * custo_unitario) + (@quantidade * @custoUnitario)) / (quantidade_atual + @quantidade)
+                        END,
+                      quantidade_atual = quantidade_atual + @quantidade
+                  WHERE id = @produtoId;
+                  """
+                : "UPDATE produtos_estoque SET quantidade_atual = quantidade_atual - @quantidade WHERE id = @produtoId;";
+            update.Parameters.AddWithValue("@produtoId", request.ProdutoId);
+            update.Parameters.AddWithValue("@quantidade", request.Quantidade);
+            update.Parameters.AddWithValue("@custoUnitario", request.CustoUnitario ?? 0);
+            await update.ExecuteNonQueryAsync(cancellationToken);
+
+            if (transacaoCriada)
+            {
+                await unitOfWork.CommitAsync(cancellationToken);
+            }
+        }
+        catch
+        {
+            if (transacaoCriada)
+            {
+                await unitOfWork.RollbackAsync(cancellationToken);
+            }
+            throw;
+        }
     }
 
     public async Task<ResultadoPaginado<MovimentacaoEstoqueDto>> ListarMovimentacoesAsync(int pagina, int tamanhoPagina, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaEstoque(connection, cancellationToken);
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaEstoque(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
         var paging = NormalizarPaginacao(pagina, tamanhoPagina);
-        var total = await ContarAsync(connection, "movimentacoes_estoque", cancellationToken);
+        var total = await ContarAsync(connection, (MySqlTransaction?)unitOfWork.Transaction, "movimentacoes_estoque", cancellationToken);
 
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             SELECT m.id, m.tipo, m.quantidade, m.custo_unitario, m.movimentado_em, m.observacao,
                    p.nome AS produto, u.nome AS usuario, m.pedido_id
@@ -225,16 +246,18 @@ public sealed class EstoqueRepository(MySqlConnectionFactory factory) : IEstoque
         command.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
     }
 
-    private static async Task<int> ContarAsync(MySqlConnection connection, string tabela, CancellationToken cancellationToken)
+    private static async Task<int> ContarAsync(DbConnection connection, MySqlTransaction? transaction, string tabela, CancellationToken cancellationToken)
     {
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = $"SELECT COUNT(*) FROM {tabela};";
         return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
     }
 
-    private static async Task GarantirEstruturaEstoque(MySqlConnection connection, CancellationToken cancellationToken)
+    private static async Task GarantirEstruturaEstoque(DbConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
     {
-        await using var categorias = connection.CreateCommand();
+        await using var categorias = (MySqlCommand)connection.CreateCommand();
+        categorias.Transaction = transaction;
         categorias.CommandText = """
             CREATE TABLE IF NOT EXISTS categorias_estoque (
                 id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -245,12 +268,13 @@ public sealed class EstoqueRepository(MySqlConnectionFactory factory) : IEstoque
             """;
         await categorias.ExecuteNonQueryAsync(cancellationToken);
 
-        await GarantirColuna(connection, "movimentacoes_estoque", "custo_unitario", "ALTER TABLE movimentacoes_estoque ADD COLUMN custo_unitario DECIMAL(10,2) NULL AFTER quantidade;", cancellationToken);
+        await GarantirColuna(connection, transaction, "movimentacoes_estoque", "custo_unitario", "ALTER TABLE movimentacoes_estoque ADD COLUMN custo_unitario DECIMAL(10,2) NULL AFTER quantidade;", cancellationToken);
     }
 
-    private static async Task GarantirColuna(MySqlConnection connection, string tabela, string coluna, string alterSql, CancellationToken cancellationToken)
+    private static async Task GarantirColuna(DbConnection connection, MySqlTransaction? transaction, string tabela, string coluna, string alterSql, CancellationToken cancellationToken)
     {
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             SELECT COUNT(*)
             FROM INFORMATION_SCHEMA.COLUMNS
@@ -262,7 +286,8 @@ public sealed class EstoqueRepository(MySqlConnectionFactory factory) : IEstoque
         command.Parameters.AddWithValue("@coluna", coluna);
         var existe = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)) > 0;
         if (existe) return;
-        await using var alter = connection.CreateCommand();
+        await using var alter = (MySqlCommand)connection.CreateCommand();
+        alter.Transaction = transaction;
         alter.CommandText = alterSql;
         try { await alter.ExecuteNonQueryAsync(cancellationToken); }
         catch (MySqlException exception) when (exception.Number == 1060) { }

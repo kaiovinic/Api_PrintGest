@@ -1,19 +1,20 @@
+using System.Data.Common;
 using MySqlConnector;
 using PrintGest.Application.Abstractions;
 using PrintGest.Infrastructure.Data;
 
 namespace PrintGest.Infrastructure.Repositories;
 
-public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFinanceiroRepository
+public sealed class FinanceiroRepository(IUnitOfWork unitOfWork) : IFinanceiroRepository
 {
     public async Task<FinanceiroVendasResult> ObterVendasAsync(FinanceiroFiltro filtro, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, cancellationToken);
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
         var periodo = ResolverPeriodo(filtro);
 
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             SELECT p.id,
                    p.numero,
@@ -88,12 +89,12 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
 
     public async Task<FinanceiroEntradasResult> ObterEntradasAsync(FinanceiroFiltro filtro, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, cancellationToken);
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
         var periodo = ResolverPeriodo(filtro);
 
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             SELECT *
             FROM (
@@ -152,12 +153,12 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
 
     public async Task<FinanceiroDespesasResult> ListarDespesasAsync(FinanceiroFiltro filtro, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, cancellationToken);
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
         var periodo = ResolverPeriodo(filtro);
 
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             SELECT id, grupo_despesa_id, numero_parcela, total_parcelas, categoria, descricao, valor, valor_total, vencimento, status, data_pagamento, observacao
             FROM despesas
@@ -218,54 +219,75 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
 
     public async Task<long> CriarDespesaAsync(FinanceiroDespesaRequest request, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
 
-        var totalParcelas = request.CondicaoPagamento == "PARCELADO" ? request.QuantidadeParcelas : 1;
-        var grupoId = Guid.NewGuid().ToString("N");
-        var valorParcela = Math.Round(request.Valor / totalParcelas, 2);
-        var restante = request.Valor;
-        long primeiroId = 0;
-
-        for (var parcela = 1; parcela <= totalParcelas; parcela++)
+        var transacaoCriada = false;
+        var transaction = unitOfWork.Transaction;
+        if (transaction == null)
         {
-            var valor = parcela == totalParcelas ? restante : valorParcela;
-            restante -= valor;
-            await using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = """
-                INSERT INTO despesas
-                    (cadastrado_por_usuario_id, grupo_despesa_id, numero_parcela, total_parcelas, categoria, descricao, valor, valor_total, vencimento, status, observacao)
-                VALUES
-                    (@usuarioId, @grupoId, @numeroParcela, @totalParcelas, @categoria, @descricao, @valor, @valorTotal, @vencimento, 'ABERTO', @observacao);
-                SELECT LAST_INSERT_ID();
-                """;
-            command.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
-            command.Parameters.AddWithValue("@grupoId", grupoId);
-            command.Parameters.AddWithValue("@numeroParcela", parcela);
-            command.Parameters.AddWithValue("@totalParcelas", totalParcelas);
-            command.Parameters.AddWithValue("@categoria", request.Categoria.Trim());
-            command.Parameters.AddWithValue("@descricao", request.Descricao.Trim());
-            command.Parameters.AddWithValue("@valor", valor);
-            command.Parameters.AddWithValue("@valorTotal", request.Valor);
-            command.Parameters.AddWithValue("@vencimento", request.Vencimento.AddMonths(parcela - 1).ToDateTime(TimeOnly.MinValue));
-            command.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
-            var id = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
-            if (primeiroId == 0) primeiroId = id;
+            transaction = await unitOfWork.BeginTransactionAsync(cancellationToken);
+            transacaoCriada = true;
         }
 
-        await transaction.CommitAsync(cancellationToken);
-        return primeiroId;
+        try
+        {
+            var totalParcelas = request.CondicaoPagamento == "PARCELADO" ? request.QuantidadeParcelas : 1;
+            var grupoId = Guid.NewGuid().ToString("N");
+            var valorParcela = Math.Round(request.Valor / totalParcelas, 2);
+            var restante = request.Valor;
+            long primeiroId = 0;
+
+            for (var parcela = 1; parcela <= totalParcelas; parcela++)
+            {
+                var valor = parcela == totalParcelas ? restante : valorParcela;
+                restante -= valor;
+                await using var command = (MySqlCommand)connection.CreateCommand();
+                command.Transaction = (MySqlTransaction)transaction;
+                command.CommandText = """
+                    INSERT INTO despesas
+                        (cadastrado_por_usuario_id, grupo_despesa_id, numero_parcela, total_parcelas, categoria, descricao, valor, valor_total, vencimento, status, observacao)
+                    VALUES
+                        (@usuarioId, @grupoId, @numeroParcela, @totalParcelas, @categoria, @descricao, @valor, @valorTotal, @vencimento, 'ABERTO', @observacao);
+                    SELECT LAST_INSERT_ID();
+                    """;
+                command.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
+                command.Parameters.AddWithValue("@grupoId", grupoId);
+                command.Parameters.AddWithValue("@numeroParcela", parcela);
+                command.Parameters.AddWithValue("@totalParcelas", totalParcelas);
+                command.Parameters.AddWithValue("@categoria", request.Categoria.Trim());
+                command.Parameters.AddWithValue("@descricao", request.Descricao.Trim());
+                command.Parameters.AddWithValue("@valor", valor);
+                command.Parameters.AddWithValue("@valorTotal", request.Valor);
+                command.Parameters.AddWithValue("@vencimento", request.Vencimento.AddMonths(parcela - 1).ToDateTime(TimeOnly.MinValue));
+                command.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
+                var id = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+                if (primeiroId == 0) primeiroId = id;
+            }
+
+            if (transacaoCriada)
+            {
+                await unitOfWork.CommitAsync(cancellationToken);
+            }
+
+            return primeiroId;
+        }
+        catch
+        {
+            if (transacaoCriada)
+            {
+                await unitOfWork.RollbackAsync(cancellationToken);
+            }
+            throw;
+        }
     }
 
     public async Task<bool> PagarDespesaAsync(long id, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, cancellationToken);
-        await using var command = connection.CreateCommand();
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = "UPDATE despesas SET status = 'PAGO', data_pagamento = CURRENT_DATE() WHERE id = @id;";
         command.Parameters.AddWithValue("@id", id);
         return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
@@ -273,11 +295,11 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
 
     public async Task<bool> AtualizarDespesaAsync(string grupoDespesaId, FinanceiroDespesaAtualizarRequest request, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, cancellationToken);
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
 
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             SELECT id
             FROM despesas
@@ -300,58 +322,79 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
             return false;
         }
 
-        var valorParcela = Math.Round(request.Valor / ids.Count, 2);
-        var restante = request.Valor;
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        for (var index = 0; index < ids.Count; index++)
+        var transacaoCriada = false;
+        var transaction = unitOfWork.Transaction;
+        if (transaction == null)
         {
-            var valor = index == ids.Count - 1 ? restante : valorParcela;
-            restante -= valor;
-            await using var update = connection.CreateCommand();
-            update.Transaction = transaction;
-            update.CommandText = """
-                UPDATE despesas
-                SET categoria = @categoria,
-                    descricao = @descricao,
-                    valor = @valor,
-                    valor_total = @valorTotal,
-                    vencimento = @vencimento,
-                    observacao = @observacao
-                WHERE id = @id;
-                """;
-            update.Parameters.AddWithValue("@id", ids[index]);
-            update.Parameters.AddWithValue("@categoria", request.Categoria.Trim());
-            update.Parameters.AddWithValue("@descricao", request.Descricao.Trim());
-            update.Parameters.AddWithValue("@valor", valor);
-            update.Parameters.AddWithValue("@valorTotal", request.Valor);
-            update.Parameters.AddWithValue("@vencimento", request.Vencimento.AddMonths(index).ToDateTime(TimeOnly.MinValue));
-            update.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
-            await update.ExecuteNonQueryAsync(cancellationToken);
+            transaction = await unitOfWork.BeginTransactionAsync(cancellationToken);
+            transacaoCriada = true;
         }
 
-        await transaction.CommitAsync(cancellationToken);
-        return true;
+        try
+        {
+            var valorParcela = Math.Round(request.Valor / ids.Count, 2);
+            var restante = request.Valor;
+            for (var index = 0; index < ids.Count; index++)
+            {
+                var valor = index == ids.Count - 1 ? restante : valorParcela;
+                restante -= valor;
+                await using var update = (MySqlCommand)connection.CreateCommand();
+                update.Transaction = (MySqlTransaction)transaction;
+                update.CommandText = """
+                    UPDATE despesas
+                    SET categoria = @categoria,
+                        descricao = @descricao,
+                        valor = @valor,
+                        valor_total = @valorTotal,
+                        vencimento = @vencimento,
+                        observacao = @observacao
+                    WHERE id = @id;
+                    """;
+                update.Parameters.AddWithValue("@id", ids[index]);
+                update.Parameters.AddWithValue("@categoria", request.Categoria.Trim());
+                update.Parameters.AddWithValue("@descricao", request.Descricao.Trim());
+                update.Parameters.AddWithValue("@valor", valor);
+                update.Parameters.AddWithValue("@valorTotal", request.Valor);
+                update.Parameters.AddWithValue("@vencimento", request.Vencimento.AddMonths(index).ToDateTime(TimeOnly.MinValue));
+                update.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
+                await update.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (transacaoCriada)
+            {
+                await unitOfWork.CommitAsync(cancellationToken);
+            }
+            return true;
+        }
+        catch
+        {
+            if (transacaoCriada)
+            {
+                await unitOfWork.RollbackAsync(cancellationToken);
+            }
+            throw;
+        }
     }
 
     public async Task<FinanceiroGraficosResult> ObterGraficosAsync(int? ano, int? mes, CancellationToken cancellationToken = default)
     {
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, cancellationToken);
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
         var anoFiltro = ano ?? DateTime.Today.Year;
         var mesFiltro = mes ?? DateTime.Today.Month;
 
-        var receitaAnual = await ListarMensal(connection, "SELECT MONTH(data_pedido) mes, COALESCE(SUM(valor_pago),0) valor FROM pedidos WHERE YEAR(data_pedido)=@ano GROUP BY MONTH(data_pedido);", anoFiltro, cancellationToken);
-        var despesaAnual = await ListarMensal(connection, "SELECT MONTH(vencimento) mes, COALESCE(SUM(valor),0) valor FROM despesas WHERE YEAR(vencimento)=@ano GROUP BY MONTH(vencimento);", anoFiltro, cancellationToken);
-        var despesasMes = await ListarPorCategoria(connection, anoFiltro, mesFiltro, cancellationToken);
-        var clientesMes = await ListarTopClientes(connection, anoFiltro, mesFiltro, cancellationToken);
+        var receitaAnual = await ListarMensal(connection, (MySqlTransaction?)unitOfWork.Transaction, "SELECT MONTH(data_pedido) mes, COALESCE(SUM(valor_pago),0) valor FROM pedidos WHERE YEAR(data_pedido)=@ano GROUP BY MONTH(data_pedido);", anoFiltro, cancellationToken);
+        var despesaAnual = await ListarMensal(connection, (MySqlTransaction?)unitOfWork.Transaction, "SELECT MONTH(vencimento) mes, COALESCE(SUM(valor),0) valor FROM despesas WHERE YEAR(vencimento)=@ano GROUP BY MONTH(vencimento);", anoFiltro, cancellationToken);
+        var despesasMes = await ListarPorCategoria(connection, (MySqlTransaction?)unitOfWork.Transaction, anoFiltro, mesFiltro, cancellationToken);
+        var clientesMes = await ListarTopClientes(connection, (MySqlTransaction?)unitOfWork.Transaction, anoFiltro, mesFiltro, cancellationToken);
 
         return new FinanceiroGraficosResult(anoFiltro, mesFiltro, receitaAnual, despesaAnual, despesasMes, clientesMes);
     }
 
-    private static async Task<IReadOnlyList<FinanceiroGraficoMensal>> ListarMensal(MySqlConnection connection, string sql, int ano, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<FinanceiroGraficoMensal>> ListarMensal(DbConnection connection, MySqlTransaction? transaction, string sql, int ano, CancellationToken cancellationToken)
     {
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = sql;
         command.Parameters.AddWithValue("@ano", ano);
         var valores = Enumerable.Range(1, 12).ToDictionary(mes => mes, _ => 0m);
@@ -360,9 +403,10 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
         return valores.Select(item => new FinanceiroGraficoMensal(item.Key, item.Value)).ToList();
     }
 
-    private static async Task<IReadOnlyList<FinanceiroDespesaCategoria>> ListarPorCategoria(MySqlConnection connection, int ano, int mes, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<FinanceiroDespesaCategoria>> ListarPorCategoria(DbConnection connection, MySqlTransaction? transaction, int ano, int mes, CancellationToken cancellationToken)
     {
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = "SELECT categoria, COALESCE(SUM(valor),0) valor FROM despesas WHERE YEAR(vencimento)=@ano AND MONTH(vencimento)=@mes GROUP BY categoria ORDER BY valor DESC;";
         command.Parameters.AddWithValue("@ano", ano);
         command.Parameters.AddWithValue("@mes", mes);
@@ -372,9 +416,10 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
         return itens;
     }
 
-    private static async Task<IReadOnlyList<FinanceiroClienteValor>> ListarTopClientes(MySqlConnection connection, int ano, int mes, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<FinanceiroClienteValor>> ListarTopClientes(DbConnection connection, MySqlTransaction? transaction, int ano, int mes, CancellationToken cancellationToken)
     {
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             SELECT c.nome cliente, COALESCE(SUM(p.total),0) valor
             FROM pedidos p
@@ -425,23 +470,25 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
         command.Parameters.AddWithValue("@status", string.IsNullOrWhiteSpace(status) ? DBNull.Value : status.Trim().ToUpperInvariant());
     }
 
-    private static async Task GarantirEstruturaFinanceiro(MySqlConnection connection, CancellationToken cancellationToken)
+    private static async Task GarantirEstruturaFinanceiro(DbConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
     {
-        await GarantirColuna(connection, "pedidos", "valor_estornado", "ALTER TABLE pedidos ADD COLUMN valor_estornado DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER motivo_cancelamento;", cancellationToken);
-        await GarantirColuna(connection, "despesas", "grupo_despesa_id", "ALTER TABLE despesas ADD COLUMN grupo_despesa_id VARCHAR(40) NULL AFTER id;", cancellationToken);
-        await GarantirColuna(connection, "despesas", "numero_parcela", "ALTER TABLE despesas ADD COLUMN numero_parcela INT NOT NULL DEFAULT 1 AFTER grupo_despesa_id;", cancellationToken);
-        await GarantirColuna(connection, "despesas", "total_parcelas", "ALTER TABLE despesas ADD COLUMN total_parcelas INT NOT NULL DEFAULT 1 AFTER numero_parcela;", cancellationToken);
-        await GarantirColuna(connection, "despesas", "valor_total", "ALTER TABLE despesas ADD COLUMN valor_total DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER valor;", cancellationToken);
-        await AjustarColunaCategoriaDespesa(connection, cancellationToken);
+        await GarantirColuna(connection, transaction, "pedidos", "valor_estornado", "ALTER TABLE pedidos ADD COLUMN valor_estornado DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER motivo_cancelamento;", cancellationToken);
+        await GarantirColuna(connection, transaction, "despesas", "grupo_despesa_id", "ALTER TABLE despesas ADD COLUMN grupo_despesa_id VARCHAR(40) NULL AFTER id;", cancellationToken);
+        await GarantirColuna(connection, transaction, "despesas", "numero_parcela", "ALTER TABLE despesas ADD COLUMN numero_parcela INT NOT NULL DEFAULT 1 AFTER grupo_despesa_id;", cancellationToken);
+        await GarantirColuna(connection, transaction, "despesas", "total_parcelas", "ALTER TABLE despesas ADD COLUMN total_parcelas INT NOT NULL DEFAULT 1 AFTER numero_parcela;", cancellationToken);
+        await GarantirColuna(connection, transaction, "despesas", "valor_total", "ALTER TABLE despesas ADD COLUMN valor_total DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER valor;", cancellationToken);
+        await AjustarColunaCategoriaDespesa(connection, transaction, cancellationToken);
 
-        await using var update = connection.CreateCommand();
+        await using var update = (MySqlCommand)connection.CreateCommand();
+        update.Transaction = transaction;
         update.CommandText = "UPDATE despesas SET grupo_despesa_id = COALESCE(grupo_despesa_id, CONCAT('LEGADO-', id)), valor_total = CASE WHEN valor_total = 0 THEN valor ELSE valor_total END;";
         await update.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task AjustarColunaCategoriaDespesa(MySqlConnection connection, CancellationToken cancellationToken)
+    private static async Task AjustarColunaCategoriaDespesa(DbConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
     {
-        await using var consulta = connection.CreateCommand();
+        await using var consulta = (MySqlCommand)connection.CreateCommand();
+        consulta.Transaction = transaction;
         consulta.CommandText = """
             SELECT DATA_TYPE
             FROM INFORMATION_SCHEMA.COLUMNS
@@ -456,14 +503,16 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
             return;
         }
 
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = "ALTER TABLE despesas MODIFY COLUMN categoria VARCHAR(120) NOT NULL;";
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task GarantirColuna(MySqlConnection connection, string tabela, string coluna, string alterSql, CancellationToken cancellationToken)
+    private static async Task GarantirColuna(DbConnection connection, MySqlTransaction? transaction, string tabela, string coluna, string alterSql, CancellationToken cancellationToken)
     {
-        await using var command = connection.CreateCommand();
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             SELECT COUNT(*)
             FROM INFORMATION_SCHEMA.COLUMNS
@@ -476,7 +525,8 @@ public sealed class FinanceiroRepository(MySqlConnectionFactory factory) : IFina
         var existe = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)) > 0;
         if (existe) return;
 
-                await using var alter = connection.CreateCommand();
+        await using var alter = (MySqlCommand)connection.CreateCommand();
+        alter.Transaction = transaction;
         alter.CommandText = alterSql;
         try
         {
