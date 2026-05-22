@@ -4,6 +4,7 @@ using PrintGest.Domain.Entities;
 
 namespace PrintGest.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/clientes")]
 public sealed class ClientesController(IClienteRepository clientes) : ControllerBase

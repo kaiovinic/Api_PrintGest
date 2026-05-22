@@ -6,4 +6,5 @@ public sealed record AuthResponse(
     string Email,
     string Perfil,
     bool DeveTrocarSenha,
-    string AccessToken);
+    string AccessToken,
+    DateTime ExpiresAt);

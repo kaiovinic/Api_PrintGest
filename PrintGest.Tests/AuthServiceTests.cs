@@ -1,6 +1,8 @@
+using Microsoft.Extensions.Options;
 using PrintGest.Application.Abstractions;
 using PrintGest.Application.Contracts.Auth;
 using PrintGest.Application.Services;
+using PrintGest.Application.Settings;
 using PrintGest.Domain.Entities;
 using PrintGest.Domain.Enums;
 
@@ -8,6 +10,14 @@ namespace PrintGest.Tests;
 
 public sealed class AuthServiceTests
 {
+    private static IOptions<JwtSettings> DefaultJwt => Options.Create(new JwtSettings
+    {
+        Secret = "chave-secreta-de-testes-com-minimo-32-chars-ok",
+        Issuer = "PrintGest",
+        Audience = "PrintGest",
+        ExpiryHours = 5
+    });
+
     [Fact]
     public async Task LoginAsync_DeveRetornarUsuario_QuandoSenhaPadraoEstiverCorreta()
     {
@@ -19,7 +29,7 @@ public sealed class AuthServiceTests
             "HASH_DA_SENHA_123456789",
             PerfilUsuario.Operacional,
             StatusUsuario.Ativo,
-            true)));
+            true)), DefaultJwt);
 
         var response = await service.LoginAsync(new LoginRequest("maria@print.com", "123456789"));
 
@@ -40,7 +50,7 @@ public sealed class AuthServiceTests
             "HASH_DA_SENHA_123456789",
             PerfilUsuario.Operacional,
             StatusUsuario.Bloqueado,
-            true)));
+            true)), DefaultJwt);
 
         var response = await service.LoginAsync(new LoginRequest("joao@print.com", "123456789"));
 
@@ -58,7 +68,7 @@ public sealed class AuthServiceTests
             "HASH_DA_SENHA_123456789",
             PerfilUsuario.Gerente,
             StatusUsuario.Ativo,
-            false)));
+            false)), DefaultJwt);
 
         var response = await service.LoginAsync(new LoginRequest("carlos@print.com", "senha-errada"));
 

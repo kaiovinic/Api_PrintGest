@@ -4,6 +4,7 @@ using PrintGest.Domain.Entities;
 
 namespace PrintGest.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/logs")]
 public sealed class LogsController(ILogRepository logRepository) : ControllerBase
