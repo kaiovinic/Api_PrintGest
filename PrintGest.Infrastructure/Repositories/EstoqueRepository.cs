@@ -214,7 +214,7 @@ public sealed class EstoqueRepository(IUnitOfWork unitOfWork) : IEstoqueReposito
         command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             SELECT m.id, m.tipo, m.quantidade, m.custo_unitario, m.movimentado_em, m.observacao,
-                   p.nome AS produto, u.nome AS usuario, m.pedido_id
+                   p.nome AS produto, p.tamanho AS tamanho, u.nome AS usuario, m.pedido_id
             FROM movimentacoes_estoque m
             INNER JOIN produtos_estoque p ON p.id = m.produto_id
             INNER JOIN usuarios u ON u.id = m.usuario_id
@@ -239,6 +239,7 @@ public sealed class EstoqueRepository(IUnitOfWork unitOfWork) : IEstoqueReposito
                 custo,
                 custo is null ? null : quantidade * custo.Value,
                 reader.GetString("produto"),
+                reader.NullableString("tamanho"),
                 reader.GetString("usuario"),
                 reader.IsDBNull(pedidoOrdinal) ? null : reader.GetInt64(pedidoOrdinal),
                 reader.GetDateTime("movimentado_em"),

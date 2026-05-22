@@ -34,6 +34,7 @@ public sealed record MovimentacaoEstoqueDto(
     decimal? CustoUnitario,
     decimal? Total,
     string Produto,
+    string? Tamanho,
     string Usuario,
     long? PedidoId,
     DateTime MovimentadoEm,
