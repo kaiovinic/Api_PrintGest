@@ -68,4 +68,21 @@ public sealed class EstoqueController(IEstoqueRepository estoque, ILogRepository
     {
         return Ok(await estoque.ListarMovimentacoesAsync(pagina, tamanhoPagina, cancellationToken));
     }
+
+    [HttpPut("movimentacoes/{id:long}")]
+    public async Task<IActionResult> EditarMovimentacao(long id, [FromBody] EditarMovimentacaoRequest request, CancellationToken cancellationToken)
+    {
+        if (request.Tipo.Equals("ENTRADA", StringComparison.OrdinalIgnoreCase) && request.CustoUnitario is null or <= 0)
+            return BadRequest(new { mensagem = "Informe o custo unitario para registrar entrada de estoque." });
+
+        try
+        {
+            await estoque.EditarMovimentacaoAsync(id, request, cancellationToken);
+            return NoContent();
+        }
+        catch (InvalidOperationException exception)
+        {
+            return NotFound(new { mensagem = exception.Message });
+        }
+    }
 }

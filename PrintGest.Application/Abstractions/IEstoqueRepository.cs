@@ -9,6 +9,7 @@ public interface IEstoqueRepository
     Task CriarCategoriaAsync(CategoriaEstoqueRequest request, CancellationToken cancellationToken = default);
     Task RegistrarMovimentacaoAsync(MovimentacaoEstoqueRequest request, CancellationToken cancellationToken = default);
     Task<ResultadoPaginado<MovimentacaoEstoqueDto>> ListarMovimentacoesAsync(int pagina, int tamanhoPagina, CancellationToken cancellationToken = default);
+    Task EditarMovimentacaoAsync(long id, EditarMovimentacaoRequest request, CancellationToken cancellationToken = default);
 }
 
 public sealed record ProdutoEstoqueDto(
@@ -34,6 +35,8 @@ public sealed record MovimentacaoEstoqueDto(
     decimal? CustoUnitario,
     decimal? Total,
     string Produto,
+    string? Tamanho,
+    long ProdutoId,
     string Usuario,
     long? PedidoId,
     DateTime MovimentadoEm,
@@ -61,3 +64,10 @@ public sealed record MovimentacaoEstoqueRequest(
     decimal? CustoUnitario,
     string? Observacao,
     string? NomeProduto = null);
+
+public sealed record EditarMovimentacaoRequest(
+    string Tipo,
+    int Quantidade,
+    decimal? CustoUnitario,
+    long? PedidoId,
+    string? Observacao);

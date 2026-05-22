@@ -214,7 +214,7 @@ public sealed class EstoqueRepository(IUnitOfWork unitOfWork) : IEstoqueReposito
         command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
         command.CommandText = """
             SELECT m.id, m.tipo, m.quantidade, m.custo_unitario, m.movimentado_em, m.observacao,
-                   p.nome AS produto, u.nome AS usuario, m.pedido_id
+                   p.nome AS produto, p.tamanho AS tamanho, m.produto_id, u.nome AS usuario, m.pedido_id
             FROM movimentacoes_estoque m
             INNER JOIN produtos_estoque p ON p.id = m.produto_id
             INNER JOIN usuarios u ON u.id = m.usuario_id
@@ -239,6 +239,8 @@ public sealed class EstoqueRepository(IUnitOfWork unitOfWork) : IEstoqueReposito
                 custo,
                 custo is null ? null : quantidade * custo.Value,
                 reader.GetString("produto"),
+                reader.NullableString("tamanho"),
+                reader.GetInt64("produto_id"),
                 reader.GetString("usuario"),
                 reader.IsDBNull(pedidoOrdinal) ? null : reader.GetInt64(pedidoOrdinal),
                 reader.GetDateTime("movimentado_em"),
@@ -246,6 +248,85 @@ public sealed class EstoqueRepository(IUnitOfWork unitOfWork) : IEstoqueReposito
         }
 
         return CriarResultado(movimentacoes, total, paging.Pagina, paging.TamanhoPagina);
+    }
+
+    public async Task EditarMovimentacaoAsync(long id, EditarMovimentacaoRequest request, CancellationToken cancellationToken = default)
+    {
+        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirEstruturaEstoque(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
+
+        var transacaoCriada = false;
+        var transaction = unitOfWork.Transaction;
+        if (transaction == null)
+        {
+            transaction = await unitOfWork.BeginTransactionAsync(cancellationToken);
+            transacaoCriada = true;
+        }
+
+        try
+        {
+            string tipoAntigo;
+            int quantidadeAntiga;
+            long produtoId;
+
+            await using (var select = (MySqlCommand)connection.CreateCommand())
+            {
+                select.Transaction = (MySqlTransaction)transaction;
+                select.CommandText = "SELECT tipo, quantidade, produto_id FROM movimentacoes_estoque WHERE id = @id;";
+                select.Parameters.AddWithValue("@id", id);
+                await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+                if (!await reader.ReadAsync(cancellationToken))
+                    throw new InvalidOperationException("Movimentacao nao encontrada.");
+                tipoAntigo = reader.GetString("tipo");
+                quantidadeAntiga = reader.GetInt32("quantidade");
+                produtoId = reader.GetInt64("produto_id");
+            }
+
+            await using var undo = (MySqlCommand)connection.CreateCommand();
+            undo.Transaction = (MySqlTransaction)transaction;
+            undo.CommandText = tipoAntigo.ToUpperInvariant() == "ENTRADA"
+                ? "UPDATE produtos_estoque SET quantidade_atual = quantidade_atual - @q WHERE id = @p;"
+                : "UPDATE produtos_estoque SET quantidade_atual = quantidade_atual + @q WHERE id = @p;";
+            undo.Parameters.AddWithValue("@q", quantidadeAntiga);
+            undo.Parameters.AddWithValue("@p", produtoId);
+            await undo.ExecuteNonQueryAsync(cancellationToken);
+
+            await using var apply = (MySqlCommand)connection.CreateCommand();
+            apply.Transaction = (MySqlTransaction)transaction;
+            apply.CommandText = request.Tipo.ToUpperInvariant() == "ENTRADA"
+                ? "UPDATE produtos_estoque SET quantidade_atual = quantidade_atual + @q, custo_unitario = @custo WHERE id = @p;"
+                : "UPDATE produtos_estoque SET quantidade_atual = quantidade_atual - @q WHERE id = @p;";
+            apply.Parameters.AddWithValue("@q", request.Quantidade);
+            apply.Parameters.AddWithValue("@p", produtoId);
+            if (request.Tipo.ToUpperInvariant() == "ENTRADA")
+                apply.Parameters.AddWithValue("@custo", request.CustoUnitario ?? 0m);
+            await apply.ExecuteNonQueryAsync(cancellationToken);
+
+            await using var update = (MySqlCommand)connection.CreateCommand();
+            update.Transaction = (MySqlTransaction)transaction;
+            update.CommandText = """
+                UPDATE movimentacoes_estoque
+                SET tipo = @tipo, quantidade = @quantidade, custo_unitario = @custo,
+                    pedido_id = @pedidoId, observacao = @observacao
+                WHERE id = @id;
+                """;
+            update.Parameters.AddWithValue("@tipo", request.Tipo);
+            update.Parameters.AddWithValue("@quantidade", request.Quantidade);
+            update.Parameters.AddWithValue("@custo", ToDb(request.CustoUnitario));
+            update.Parameters.AddWithValue("@pedidoId", ToDb(request.PedidoId));
+            update.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
+            update.Parameters.AddWithValue("@id", id);
+            await update.ExecuteNonQueryAsync(cancellationToken);
+
+            if (transacaoCriada)
+                await unitOfWork.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            if (transacaoCriada)
+                await unitOfWork.RollbackAsync(cancellationToken);
+            throw;
+        }
     }
 
     private static void PreencherProduto(MySqlCommand command, ProdutoEstoqueRequest request)
