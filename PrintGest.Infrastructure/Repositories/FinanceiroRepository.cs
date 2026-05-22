@@ -389,8 +389,10 @@ public sealed class FinanceiroRepository(IUnitOfWork unitOfWork) : IFinanceiroRe
         var despesaAnual = await ListarMensal(connection, (MySqlTransaction?)unitOfWork.Transaction, "SELECT MONTH(vencimento) mes, COALESCE(SUM(valor),0) valor FROM despesas WHERE YEAR(vencimento)=@ano GROUP BY MONTH(vencimento);", anoFiltro, cancellationToken);
         var despesasMes = await ListarPorCategoria(connection, (MySqlTransaction?)unitOfWork.Transaction, anoFiltro, mesFiltro, cancellationToken);
         var clientesMes = await ListarTopClientes(connection, (MySqlTransaction?)unitOfWork.Transaction, anoFiltro, mesFiltro, cancellationToken);
+        var pedidosPorStatus = await ListarPedidosPorStatus(connection, (MySqlTransaction?)unitOfWork.Transaction, anoFiltro, mesFiltro, cancellationToken);
+        var usuariosRanking = await ListarUsuariosRanking(connection, (MySqlTransaction?)unitOfWork.Transaction, anoFiltro, mesFiltro, cancellationToken);
 
-        return new FinanceiroGraficosResult(anoFiltro, mesFiltro, receitaAnual, despesaAnual, despesasMes, clientesMes);
+        return new FinanceiroGraficosResult(anoFiltro, mesFiltro, receitaAnual, despesaAnual, despesasMes, clientesMes, pedidosPorStatus, usuariosRanking);
     }
 
     private static async Task<IReadOnlyList<FinanceiroGraficoMensal>> ListarMensal(DbConnection connection, MySqlTransaction? transaction, string sql, int ano, CancellationToken cancellationToken)
@@ -436,6 +438,45 @@ public sealed class FinanceiroRepository(IUnitOfWork unitOfWork) : IFinanceiroRe
         var itens = new List<FinanceiroClienteValor>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken)) itens.Add(new FinanceiroClienteValor(reader.GetString("cliente"), reader.GetDecimal("valor")));
+        return itens;
+    }
+
+    private static async Task<IReadOnlyList<FinanceiroPedidoStatus>> ListarPedidosPorStatus(DbConnection connection, MySqlTransaction? transaction, int ano, int mes, CancellationToken cancellationToken)
+    {
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT status, COUNT(*) quantidade
+            FROM pedidos
+            WHERE tipo = 'PEDIDO' AND YEAR(data_pedido)=@ano AND MONTH(data_pedido)=@mes
+            GROUP BY status;
+            """;
+        command.Parameters.AddWithValue("@ano", ano);
+        command.Parameters.AddWithValue("@mes", mes);
+        var itens = new List<FinanceiroPedidoStatus>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken)) itens.Add(new FinanceiroPedidoStatus(reader.GetString("status"), reader.GetInt32("quantidade")));
+        return itens;
+    }
+
+    private static async Task<IReadOnlyList<FinanceiroUsuarioRanking>> ListarUsuariosRanking(DbConnection connection, MySqlTransaction? transaction, int ano, int mes, CancellationToken cancellationToken)
+    {
+        await using var command = (MySqlCommand)connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT u.nome usuario, COUNT(p.id) quantidade_pedidos
+            FROM pedidos p
+            INNER JOIN usuarios u ON u.id = p.criado_por_usuario_id
+            WHERE p.tipo = 'PEDIDO' AND YEAR(p.data_pedido)=@ano AND MONTH(p.data_pedido)=@mes
+            GROUP BY u.nome
+            ORDER BY quantidade_pedidos DESC
+            LIMIT 10;
+            """;
+        command.Parameters.AddWithValue("@ano", ano);
+        command.Parameters.AddWithValue("@mes", mes);
+        var itens = new List<FinanceiroUsuarioRanking>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken)) itens.Add(new FinanceiroUsuarioRanking(reader.GetString("usuario"), reader.GetInt32("quantidade_pedidos")));
         return itens;
     }
 

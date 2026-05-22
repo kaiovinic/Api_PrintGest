@@ -59,4 +59,5 @@ public sealed record MovimentacaoEstoqueRequest(
     string Tipo,
     int Quantidade,
     decimal? CustoUnitario,
-    string? Observacao);
+    string? Observacao,
+    string? NomeProduto = null);

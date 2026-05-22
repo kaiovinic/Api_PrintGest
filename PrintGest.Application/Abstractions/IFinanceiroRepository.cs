@@ -133,10 +133,16 @@ public sealed record FinanceiroGraficosResult(
     IReadOnlyList<FinanceiroGraficoMensal> ReceitaAnual,
     IReadOnlyList<FinanceiroGraficoMensal> DespesaAnual,
     IReadOnlyList<FinanceiroDespesaCategoria> DespesasMes,
-    IReadOnlyList<FinanceiroClienteValor> ClientesMes);
+    IReadOnlyList<FinanceiroClienteValor> ClientesMes,
+    IReadOnlyList<FinanceiroPedidoStatus> PedidosPorStatus,
+    IReadOnlyList<FinanceiroUsuarioRanking> UsuariosRanking);
 
 public sealed record FinanceiroGraficoMensal(int Mes, decimal Valor);
 
 public sealed record FinanceiroDespesaCategoria(string Categoria, decimal Valor);
 
 public sealed record FinanceiroClienteValor(string Cliente, decimal Valor);
+
+public sealed record FinanceiroPedidoStatus(string Status, int Quantidade);
+
+public sealed record FinanceiroUsuarioRanking(string Usuario, int QuantidadePedidos);

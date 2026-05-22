@@ -7,6 +7,24 @@ namespace PrintGest.Infrastructure.Repositories;
 
 public sealed class LogRepository(IUnitOfWork unitOfWork) : ILogRepository
 {
+    private static async Task GarantirTabelaAsync(MySqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS logs_sistema (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                usuario_id BIGINT UNSIGNED NOT NULL,
+                entidade VARCHAR(60) NOT NULL,
+                entidade_id BIGINT UNSIGNED NOT NULL,
+                acao VARCHAR(60) NOT NULL,
+                descricao VARCHAR(500) NULL,
+                criado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT fk_log_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+            );
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task<ResultadoPaginado<LogSistema>> ListAsync(
         string? entidade,
         long? entidadeId,
@@ -18,6 +36,7 @@ public sealed class LogRepository(IUnitOfWork unitOfWork) : ILogRepository
     {
         var logs = new List<LogSistema>();
         var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirTabelaAsync((MySqlConnection)connection, cancellationToken);
 
         var paginaAtual = Math.Max(pagina, 1);
         var tamanho = Math.Clamp(tamanhoPagina, 5, 100);
@@ -90,6 +109,7 @@ public sealed class LogRepository(IUnitOfWork unitOfWork) : ILogRepository
     public async Task<long> CreateAsync(LogSistema log, CancellationToken cancellationToken = default)
     {
         var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
+        await GarantirTabelaAsync((MySqlConnection)connection, cancellationToken);
 
         await using var command = (MySqlCommand)connection.CreateCommand();
         command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;

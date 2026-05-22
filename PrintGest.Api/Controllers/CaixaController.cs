@@ -1,11 +1,12 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using PrintGest.Application.Abstractions;
+using PrintGest.Domain.Entities;
 
 namespace PrintGest.Api.Controllers;
 
 [ApiController]
 [Route("api/caixa")]
-public sealed class CaixaController(ICaixaRepository caixa) : ControllerBase
+public sealed class CaixaController(ICaixaRepository caixa, ILogRepository logRepository) : ControllerBase
 {
     [HttpGet("resumo")]
     public async Task<IActionResult> Resumo([FromQuery] DateOnly? inicio, [FromQuery] DateOnly? fim, CancellationToken cancellationToken)
@@ -29,6 +30,7 @@ public sealed class CaixaController(ICaixaRepository caixa) : ControllerBase
         try
         {
             var id = await caixa.CriarMovimentacaoAsync(request, cancellationToken);
+            await logRepository.CreateAsync(new LogSistema(0, request.UsuarioId, null, "Caixa", id, tipo, $"{request.Tipo} de {request.Valor:C} — {request.Descricao}.", DateTime.UtcNow), cancellationToken);
             return CreatedAtAction(nameof(ListarMovimentacoes), new { id }, new { id });
         }
         catch (InvalidOperationException exception)

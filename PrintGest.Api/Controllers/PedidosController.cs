@@ -1,12 +1,13 @@
 using Microsoft.AspNetCore.Mvc;
 using PrintGest.Application.Abstractions;
+using PrintGest.Domain.Entities;
 using System.ComponentModel.DataAnnotations;
 
 namespace PrintGest.Api.Controllers;
 
 [ApiController]
 [Route("api/pedidos")]
-public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork unitOfWork) : ControllerBase
+public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork unitOfWork, ILogRepository logRepository) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> Listar(
@@ -47,6 +48,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             var dto = MapToDto(request);
             var id = await pedidos.CriarPedidoAsync(dto, "ORCAMENTO", "ORCADO", cancellationToken);
             await unitOfWork.CommitAsync(cancellationToken);
+            await logRepository.CreateAsync(new LogSistema(0, dto.UsuarioId, null, "Orcamento", id, "CRIADO", $"Orçamento #{dto.Numero} criado para {dto.ClienteNome}.", DateTime.UtcNow), cancellationToken);
             return CreatedAtAction(nameof(Listar), new { id }, new { id });
         }
         catch
@@ -65,6 +67,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             var dto = MapToDto(request);
             var id = await pedidos.CriarPedidoAsync(dto, "PEDIDO", "ABERTO", cancellationToken);
             await unitOfWork.CommitAsync(cancellationToken);
+            await logRepository.CreateAsync(new LogSistema(0, dto.UsuarioId, null, "Pedido", id, "CRIADO", $"Pedido #{dto.Numero} criado para {dto.ClienteNome}.", DateTime.UtcNow), cancellationToken);
             return CreatedAtAction(nameof(Listar), new { id }, new { id });
         }
         catch
@@ -85,7 +88,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             if (!sucesso)
             {
                 await unitOfWork.RollbackAsync(cancellationToken);
-                
+
                 var estado = await pedidos.ObterEstadoPedidoAsync(id, cancellationToken);
                 if (estado is null)
                 {
@@ -104,6 +107,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             }
 
             await unitOfWork.CommitAsync(cancellationToken);
+            await logRepository.CreateAsync(new LogSistema(0, dto.UsuarioId, null, "Orcamento", id, "EDITADO", $"Orçamento #{id} editado.", DateTime.UtcNow), cancellationToken);
             return NoContent();
         }
         catch
@@ -128,6 +132,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             }
 
             await unitOfWork.CommitAsync(cancellationToken);
+            await logRepository.CreateAsync(new LogSistema(0, dto.UsuarioId, null, "Pedido", id, "EDITADO", $"Pedido #{id} editado.", DateTime.UtcNow), cancellationToken);
             return NoContent();
         }
         catch
@@ -158,6 +163,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             }
 
             await unitOfWork.CommitAsync(cancellationToken);
+            await logRepository.CreateAsync(new LogSistema(0, request.UsuarioId, null, "Pedido", id, "CONVERTIDO", $"Orçamento #{id} convertido em pedido.", DateTime.UtcNow), cancellationToken);
             return Ok(new { mensagem = "Orcamento convertido em pedido." });
         }
         catch
@@ -180,7 +186,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
                 return NotFound(new { mensagem = "Pedido ou orcamento nao encontrado." });
             }
 
-            var (_, statusAtual, valorPago, _) = estado.Value;
+            var (tipoAtual, statusAtual, valorPago, _) = estado.Value;
 
             if (string.IsNullOrWhiteSpace(request.Observacao) || request.Observacao.Trim().Length < 10)
             {
@@ -234,6 +240,8 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             }
 
             await unitOfWork.CommitAsync(cancellationToken);
+            var entidadeCancelada = tipoAtual == "ORCAMENTO" ? "Orcamento" : "Pedido";
+            await logRepository.CreateAsync(new LogSistema(0, request.UsuarioId, null, entidadeCancelada, id, "CANCELADO", request.Observacao?.Trim(), DateTime.UtcNow), cancellationToken);
             return NoContent();
         }
         catch
@@ -308,6 +316,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             }
 
             await unitOfWork.CommitAsync(cancellationToken);
+            await logRepository.CreateAsync(new LogSistema(0, request.UsuarioId, null, "Pedido", id, "ESTORNO", $"Devolução de {request.ValorDevolvido:C} registrada. {request.Observacao?.Trim()}", DateTime.UtcNow), cancellationToken);
             return NoContent();
         }
         catch
@@ -380,6 +389,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
             }
 
             await unitOfWork.CommitAsync(cancellationToken);
+            await logRepository.CreateAsync(new LogSistema(0, request.UsuarioId, null, "Pedido", id, "FINALIZADO", $"Pedido #{id} finalizado.", DateTime.UtcNow), cancellationToken);
             return NoContent();
         }
         catch

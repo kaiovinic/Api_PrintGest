@@ -1,11 +1,12 @@
 using Microsoft.AspNetCore.Mvc;
 using PrintGest.Application.Abstractions;
+using PrintGest.Domain.Entities;
 
 namespace PrintGest.Api.Controllers;
 
 [ApiController]
 [Route("api/financeiro")]
-public sealed class FinanceiroController(IFinanceiroRepository financeiro) : ControllerBase
+public sealed class FinanceiroController(IFinanceiroRepository financeiro, ILogRepository logRepository) : ControllerBase
 {
     [HttpGet("vendas")]
     public async Task<IActionResult> Vendas([FromQuery] int? ano, [FromQuery] int? mes, [FromQuery] DateOnly? inicio, [FromQuery] DateOnly? fim, [FromQuery] string? status, [FromQuery] int pagina = 1, [FromQuery] int tamanhoPagina = 10, CancellationToken cancellationToken = default)
@@ -42,6 +43,7 @@ public sealed class FinanceiroController(IFinanceiroRepository financeiro) : Con
         }
 
         var id = await financeiro.CriarDespesaAsync(request, cancellationToken);
+        await logRepository.CreateAsync(new LogSistema(0, request.UsuarioId, null, "Despesa", id, "CRIADA", $"Despesa '{request.Descricao}' de {request.Valor:C} criada.", DateTime.UtcNow), cancellationToken);
         return CreatedAtAction(nameof(ListarDespesas), new { id }, new { id });
     }
 

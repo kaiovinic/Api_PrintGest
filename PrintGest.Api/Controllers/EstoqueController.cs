@@ -1,11 +1,12 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using PrintGest.Application.Abstractions;
+using PrintGest.Domain.Entities;
 
 namespace PrintGest.Api.Controllers;
 
 [ApiController]
 [Route("api/estoque")]
-public sealed class EstoqueController(IEstoqueRepository estoque) : ControllerBase
+public sealed class EstoqueController(IEstoqueRepository estoque, ILogRepository logRepository) : ControllerBase
 {
     [HttpGet("produtos")]
     public async Task<IActionResult> ListarProdutos([FromQuery] int pagina = 1, [FromQuery] int tamanhoPagina = 10, CancellationToken cancellationToken = default)
@@ -51,6 +52,8 @@ public sealed class EstoqueController(IEstoqueRepository estoque) : ControllerBa
         try
         {
             await estoque.RegistrarMovimentacaoAsync(request, cancellationToken);
+            var nomeProduto = string.IsNullOrWhiteSpace(request.NomeProduto) ? $"produto #{request.ProdutoId}" : request.NomeProduto;
+            await logRepository.CreateAsync(new LogSistema(0, request.UsuarioId, null, "Estoque", request.ProdutoId, request.Tipo.ToUpperInvariant(), $"{request.Tipo} de {request.Quantidade} unidade(s) — {nomeProduto}.", DateTime.UtcNow), cancellationToken);
             return Ok(new { mensagem = "Movimentacao registrada com sucesso." });
         }
         catch (InvalidOperationException exception)

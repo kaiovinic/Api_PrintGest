@@ -16,8 +16,19 @@ public sealed class AuthController(IAuthService authService, IUsuarioRepository 
         [FromBody] LoginRequest request,
         CancellationToken cancellationToken)
     {
+        if (!string.IsNullOrWhiteSpace(request.Email))
+        {
+            var usuario = await usuarioRepository.GetByEmailAsync(request.Email.Trim(), cancellationToken);
+            if (usuario?.Status == StatusUsuario.Bloqueado)
+            {
+                return Unauthorized(new { mensagem = "Usuário bloqueado. Entre em contato com o administrador." });
+            }
+        }
+
         var response = await authService.LoginAsync(request, cancellationToken);
-        return response is null ? Unauthorized() : Ok(response);
+        return response is null
+            ? Unauthorized(new { mensagem = "Email ou senha inválidos." })
+            : Ok(response);
     }
 
     [HttpPatch("trocar-senha")]
