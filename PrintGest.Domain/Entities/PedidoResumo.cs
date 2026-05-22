@@ -1,4 +1,4 @@
-using PrintGest.Domain.Enums;
+﻿using PrintGest.Domain.Enums;
 
 namespace PrintGest.Domain.Entities;
 
@@ -12,6 +12,8 @@ public sealed record PedidoResumo(
     DateOnly? DataEntrega,
     decimal Total,
     decimal ValorPago,
+    decimal ValorEstornado,
     decimal SaldoDevedor,
     string CriadoPor,
     string? MotivoCancelamento);
+

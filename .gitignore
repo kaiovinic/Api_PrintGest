@@ -45,3 +45,6 @@ appsettings.*.Local.json
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Temporary local build output
+artifacts/

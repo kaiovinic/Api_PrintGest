@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {
+      "PrintGest.Domain/1.0.0": {
+        "runtime": {
+          "PrintGest.Domain.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "PrintGest.Domain/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

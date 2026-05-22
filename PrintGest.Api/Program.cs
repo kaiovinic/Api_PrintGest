@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Mvc;
 using PrintGest.Application;
 using PrintGest.Infrastructure;
 using System.Text.Json.Serialization;
@@ -8,9 +9,27 @@ builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
         options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+        options.JsonSerializerOptions.Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
     });
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.Configure<ApiBehaviorOptions>(options =>
+{
+    options.InvalidModelStateResponseFactory = context =>
+    {
+        var erros = context.ModelState
+            .Where(item => item.Value?.Errors.Count > 0)
+            .ToDictionary(
+                item => item.Key,
+                item => item.Value!.Errors.Select(error => error.ErrorMessage).ToArray());
+
+        return new BadRequestObjectResult(new
+        {
+            mensagem = "Existem campos invalidos na requisicao.",
+            erros
+        });
+    };
+});
 
 builder.Services.AddCors(options =>
 {

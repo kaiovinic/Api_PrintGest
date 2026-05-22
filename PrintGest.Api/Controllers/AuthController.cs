@@ -2,22 +2,33 @@ using Microsoft.AspNetCore.Mvc;
 using PrintGest.Application.Abstractions;
 using PrintGest.Application.Contracts.Auth;
 using PrintGest.Application.Services;
-using PrintGest.Infrastructure.Data;
+using PrintGest.Domain.Enums;
 using System.Text.RegularExpressions;
 
 namespace PrintGest.Api.Controllers;
 
 [ApiController]
 [Route("api/auth")]
-public sealed class AuthController(IAuthService authService, MySqlConnectionFactory factory) : ControllerBase
+public sealed class AuthController(IAuthService authService, IUsuarioRepository usuarioRepository) : ControllerBase
 {
     [HttpPost("login")]
     public async Task<IActionResult> Login(
         [FromBody] LoginRequest request,
         CancellationToken cancellationToken)
     {
+        if (!string.IsNullOrWhiteSpace(request.Email))
+        {
+            var usuario = await usuarioRepository.GetByEmailAsync(request.Email.Trim(), cancellationToken);
+            if (usuario?.Status == StatusUsuario.Bloqueado)
+            {
+                return Unauthorized(new { mensagem = "Usuário bloqueado. Entre em contato com o administrador." });
+            }
+        }
+
         var response = await authService.LoginAsync(request, cancellationToken);
-        return response is null ? Unauthorized() : Ok(response);
+        return response is null
+            ? Unauthorized(new { mensagem = "Email ou senha inválidos." })
+            : Ok(response);
     }
 
     [HttpPatch("trocar-senha")]
@@ -38,54 +49,29 @@ public sealed class AuthController(IAuthService authService, MySqlConnectionFact
             });
         }
 
-        await using var connection = factory.Create();
-        await connection.OpenAsync(cancellationToken);
-
-        await using var select = connection.CreateCommand();
-        select.CommandText = """
-            SELECT id, senha_hash, status
-            FROM usuarios
-            WHERE email = @email
-            LIMIT 1;
-            """;
-        select.Parameters.AddWithValue("@email", request.Email);
-
-        long id;
-        string senhaHash;
-        string status;
-        await using (var reader = await select.ExecuteReaderAsync(cancellationToken))
+        var usuario = await usuarioRepository.GetByEmailAsync(request.Email, cancellationToken);
+        if (usuario is null)
         {
-            if (!await reader.ReadAsync(cancellationToken))
-            {
-                return NotFound(new { mensagem = "Usuário não encontrado." });
-            }
-
-            id = reader.GetInt64("id");
-            senhaHash = reader.GetString("senha_hash");
-            status = reader.GetString("status");
+            return NotFound(new { mensagem = "Usuário não encontrado." });
         }
 
-        if (status == "BLOQUEADO")
+        if (usuario.Status == StatusUsuario.Bloqueado)
         {
             return Forbid();
         }
 
-        if (!AuthService.SenhaValida(request.SenhaAtual, senhaHash))
+        if (!AuthService.SenhaValida(request.SenhaAtual, usuario.SenhaHash))
         {
             return Unauthorized(new { mensagem = "Senha atual inválida." });
         }
 
-        await using var update = connection.CreateCommand();
-        update.CommandText = """
-            UPDATE usuarios
-            SET senha_hash = @senhaHash, deve_trocar_senha = FALSE
-            WHERE id = @id;
-            """;
-        update.Parameters.AddWithValue("@id", id);
-        update.Parameters.AddWithValue("@senhaHash", AuthService.GerarHashLocal(request.NovaSenha));
-        await update.ExecuteNonQueryAsync(cancellationToken);
+        var sucesso = await usuarioRepository.UpdatePasswordAsync(
+            usuario.Id, 
+            AuthService.GerarHashLocal(request.NovaSenha), 
+            false, 
+            cancellationToken);
 
-        return NoContent();
+        return sucesso ? NoContent() : BadRequest(new { mensagem = "Não foi possível atualizar a senha." });
     }
 
     private static bool SenhaForte(string senha)
