@@ -1,6 +1,8 @@
+using Microsoft.Extensions.Options;
 using PrintGest.Application.Abstractions;
 using PrintGest.Application.Contracts.Auth;
 using PrintGest.Application.Services;
+using PrintGest.Application.Settings;
 using PrintGest.Domain.Entities;
 using PrintGest.Domain.Enums;
 
@@ -8,10 +10,18 @@ namespace PrintGest.Tests;
 
 public sealed class AuthServicePasswordTests
 {
+    private static IOptions<JwtSettings> DefaultJwt => Options.Create(new JwtSettings
+    {
+        Secret = "chave-secreta-de-testes-com-minimo-32-chars-ok",
+        Issuer = "PrintGest",
+        Audience = "PrintGest",
+        ExpiryHours = 5
+    });
+
     [Fact]
     public async Task LoginAsync_DeveRetornarNull_QuandoEmailEstiverVazio()
     {
-        var service = new AuthService(new FakeUsuarioRepositoryVazio());
+        var service = new AuthService(new FakeUsuarioRepositoryVazio(), DefaultJwt);
 
         var response = await service.LoginAsync(new LoginRequest("", "qualquersenha"));
 
@@ -21,7 +31,7 @@ public sealed class AuthServicePasswordTests
     [Fact]
     public async Task LoginAsync_DeveRetornarNull_QuandoSenhaEstiverVazia()
     {
-        var service = new AuthService(new FakeUsuarioRepositoryVazio());
+        var service = new AuthService(new FakeUsuarioRepositoryVazio(), DefaultJwt);
 
         var response = await service.LoginAsync(new LoginRequest("user@test.com", ""));
 
@@ -31,7 +41,7 @@ public sealed class AuthServicePasswordTests
     [Fact]
     public async Task LoginAsync_DeveRetornarNull_QuandoUsuarioNaoExistir()
     {
-        var service = new AuthService(new FakeUsuarioRepositoryVazio());
+        var service = new AuthService(new FakeUsuarioRepositoryVazio(), DefaultJwt);
 
         var response = await service.LoginAsync(new LoginRequest("naoexiste@test.com", "123456789"));
 
@@ -86,7 +96,7 @@ public sealed class AuthServicePasswordTests
             hash,
             PerfilUsuario.Gerente,
             StatusUsuario.Ativo,
-            false)));
+            false)), DefaultJwt);
 
         var response = await service.LoginAsync(new LoginRequest("ana@print.com", senha));
 

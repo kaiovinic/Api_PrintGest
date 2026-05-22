@@ -4,6 +4,7 @@ using PrintGest.Domain.Entities;
 
 namespace PrintGest.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/financeiro")]
 public sealed class FinanceiroController(IFinanceiroRepository financeiro, ILogRepository logRepository) : ControllerBase

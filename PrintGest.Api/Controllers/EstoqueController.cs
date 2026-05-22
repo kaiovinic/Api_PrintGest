@@ -4,6 +4,7 @@ using PrintGest.Domain.Entities;
 
 namespace PrintGest.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/estoque")]
 public sealed class EstoqueController(IEstoqueRepository estoque, ILogRepository logRepository) : ControllerBase

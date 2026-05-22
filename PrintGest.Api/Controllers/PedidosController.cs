@@ -5,6 +5,7 @@ using System.ComponentModel.DataAnnotations;
 
 namespace PrintGest.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/pedidos")]
 public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork unitOfWork, ILogRepository logRepository) : ControllerBase

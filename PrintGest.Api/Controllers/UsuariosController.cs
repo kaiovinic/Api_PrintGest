@@ -6,6 +6,7 @@ using PrintGest.Domain.Enums;
 
 namespace PrintGest.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/usuarios")]
 public sealed class UsuariosController(IUsuarioRepository usuarios) : ControllerBase

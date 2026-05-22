@@ -510,6 +510,14 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
 
         if (saldoDevedor > 0 && request.ReceberSaldo)
         {
+            await GarantirColuna(
+                (MySqlConnection)connection,
+                transaction,
+                "pagamentos",
+                "registrado_em",
+                "ALTER TABLE pagamentos ADD COLUMN registrado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;",
+                cancellationToken);
+
             var formaPagamento = NormalizarFormaPagamento(request.FormaPagamento);
             await using var pagamento = (MySqlCommand)connection.CreateCommand();
             pagamento.Transaction = transaction;

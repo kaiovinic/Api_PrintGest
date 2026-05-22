@@ -4,6 +4,7 @@ using PrintGest.Domain.Entities;
 
 namespace PrintGest.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/caixa")]
 public sealed class CaixaController(ICaixaRepository caixa, ILogRepository logRepository) : ControllerBase
