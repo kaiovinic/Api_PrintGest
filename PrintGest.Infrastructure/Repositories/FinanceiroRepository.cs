@@ -46,40 +46,56 @@ public sealed class FinanceiroRepository(IUnitOfWork unitOfWork) : IFinanceiroRe
         decimal devolvido = 0;
         var devolucoes = 0;
         var emAndamento = 0;
-        var entrouHoje = 0m;
-        var hoje = DateOnly.FromDateTime(DateTime.Today);
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            var dataPedido = DateOnly.FromDateTime(reader.GetDateTime("data_pedido"));
-            var valorPago = reader.GetDecimal("valor_pago");
-            var valorEstornado = reader.GetDecimal("valor_estornado");
-            var saldoDevedor = reader.GetDecimal("saldo_devedor");
-            var statusPedido = reader.GetString("status");
-            total += reader.GetDecimal("total");
-            pago += valorPago;
-            saldo += saldoDevedor;
-            devolvido += valorEstornado;
-            if (valorEstornado > 0) devolucoes++;
-            if (statusPedido == "ABERTO") emAndamento++;
-            if (dataPedido == hoje) entrouHoje += valorPago;
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var dataPedido = DateOnly.FromDateTime(reader.GetDateTime("data_pedido"));
+                var valorPago = reader.GetDecimal("valor_pago");
+                var valorEstornado = reader.GetDecimal("valor_estornado");
+                var saldoDevedor = reader.GetDecimal("saldo_devedor");
+                var statusPedido = reader.GetString("status");
+                total += reader.GetDecimal("total");
+                pago += valorPago;
+                saldo += saldoDevedor;
+                devolvido += valorEstornado;
+                if (valorEstornado > 0) devolucoes++;
+                if (statusPedido == "ABERTO") emAndamento++;
 
-            pedidos.Add(new FinanceiroPedido(
-                reader.GetInt64("id"),
-                reader.GetString("numero"),
-                reader.GetString("cliente"),
-                reader.GetString("tipo"),
-                statusPedido,
-                dataPedido,
-                GetNullableDateOnly(reader, "data_entrega"),
-                reader.GetDecimal("total"),
-                valorPago,
-                valorEstornado,
-                saldoDevedor,
-                reader.GetString("criado_por"),
-                reader.NullableString("motivo_cancelamento")));
-        }
+                pedidos.Add(new FinanceiroPedido(
+                    reader.GetInt64("id"),
+                    reader.GetString("numero"),
+                    reader.GetString("cliente"),
+                    reader.GetString("tipo"),
+                    statusPedido,
+                    dataPedido,
+                    GetNullableDateOnly(reader, "data_entrega"),
+                    reader.GetDecimal("total"),
+                    valorPago,
+                    valorEstornado,
+                    saldoDevedor,
+                    reader.GetString("criado_por"),
+                    reader.NullableString("motivo_cancelamento")));
+            }
+        } // reader fechado aqui — libera a conexão para o próximo comando
+
+        // Calcula "entrou hoje" somando pagamentos registrados hoje (mesma lógica do endpoint de entradas)
+        await using var hojeCommand = (MySqlCommand)connection.CreateCommand();
+        hojeCommand.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
+        hojeCommand.CommandText = """
+            SELECT COALESCE(SUM(valor), 0)
+            FROM (
+                SELECT valor_total AS valor
+                FROM pagamentos
+                WHERE DATE(registrado_em) = CURDATE()
+                UNION ALL
+                SELECT valor
+                FROM caixa_movimentacoes
+                WHERE tipo = 'ENTRADA' AND DATE(movimentado_em) = CURDATE()
+            ) hoje;
+            """;
+        var entrouHoje = Convert.ToDecimal(await hojeCommand.ExecuteScalarAsync(cancellationToken));
 
         return new FinanceiroVendasResult(
             new FinanceiroPeriodo(DateOnly.FromDateTime(periodo.Inicio), DateOnly.FromDateTime(periodo.Fim.Date)),
@@ -516,6 +532,7 @@ public sealed class FinanceiroRepository(IUnitOfWork unitOfWork) : IFinanceiroRe
     private static async Task GarantirEstruturaFinanceiro(DbConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
     {
         await GarantirColuna(connection, transaction, "pedidos", "valor_estornado", "ALTER TABLE pedidos ADD COLUMN valor_estornado DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER motivo_cancelamento;", cancellationToken);
+        await GarantirColuna(connection, transaction, "pagamentos", "registrado_em", "ALTER TABLE pagamentos ADD COLUMN registrado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;", cancellationToken);
         await GarantirColuna(connection, transaction, "despesas", "grupo_despesa_id", "ALTER TABLE despesas ADD COLUMN grupo_despesa_id VARCHAR(40) NULL AFTER id;", cancellationToken);
         await GarantirColuna(connection, transaction, "despesas", "numero_parcela", "ALTER TABLE despesas ADD COLUMN numero_parcela INT NOT NULL DEFAULT 1 AFTER grupo_despesa_id;", cancellationToken);
         await GarantirColuna(connection, transaction, "despesas", "total_parcelas", "ALTER TABLE despesas ADD COLUMN total_parcelas INT NOT NULL DEFAULT 1 AFTER numero_parcela;", cancellationToken);

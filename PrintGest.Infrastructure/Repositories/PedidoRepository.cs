@@ -111,7 +111,7 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
     public async Task<PedidoDetalhe?> GetDetailsByIdAsync(long id, CancellationToken cancellationToken = default)
     {
         var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirColunaRegistradoEmPagamentos((MySqlConnection)connection, cancellationToken);
+        await GarantirColuna((MySqlConnection)connection, (MySqlTransaction?)unitOfWork.Transaction, "pagamentos", "registrado_em", "ALTER TABLE pagamentos ADD COLUMN registrado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;", cancellationToken);
         await GarantirEstruturaCancelamento((MySqlConnection)connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
 
         await using var command = (MySqlCommand)connection.CreateCommand();
@@ -265,6 +265,7 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
         await SubstituirItensPedido((MySqlConnection)connection, transaction, id, request.Itens, cancellationToken);
         if (tipo == "PEDIDO" && request.ValorPago > 0)
         {
+            await GarantirColuna((MySqlConnection)connection, transaction, "pagamentos", "registrado_em", "ALTER TABLE pagamentos ADD COLUMN registrado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;", cancellationToken);
             await RegistrarPagamentoInicial((MySqlConnection)connection, transaction, id, request, cancellationToken);
         }
 
@@ -313,6 +314,14 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
         var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
         var transaction = (MySqlTransaction?)await unitOfWork.BeginTransactionAsync(cancellationToken);
 
+        // Verifica se era orçamento antes do UPDATE (detecta conversão)
+        await using var tipoQuery = (MySqlCommand)connection.CreateCommand();
+        tipoQuery.Transaction = transaction;
+        tipoQuery.CommandText = "SELECT tipo FROM pedidos WHERE id = @id LIMIT 1;";
+        tipoQuery.Parameters.AddWithValue("@id", id);
+        var tipoAtual = Convert.ToString(await tipoQuery.ExecuteScalarAsync(cancellationToken));
+        var eraOrcamento = tipoAtual == "ORCAMENTO";
+
         await using var command = (MySqlCommand)connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
@@ -346,6 +355,16 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
 
         await AtualizarCliente((MySqlConnection)connection, transaction, request, cancellationToken);
         await SubstituirItensPedido((MySqlConnection)connection, transaction, id, request.Itens, cancellationToken);
+
+        // Se era orçamento e há valor de entrada, registra o pagamento inicial
+        if (eraOrcamento && request.ValorPago > 0)
+        {
+            await GarantirColuna((MySqlConnection)connection, transaction, "pagamentos", "registrado_em",
+                "ALTER TABLE pagamentos ADD COLUMN registrado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;",
+                cancellationToken);
+            await RegistrarPagamentoInicial((MySqlConnection)connection, transaction, id, request, cancellationToken);
+        }
+
         return true;
     }
 
@@ -376,20 +395,24 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
             return false;
         }
 
-        await using var pagamento = (MySqlCommand)connection.CreateCommand();
-        pagamento.Transaction = transaction;
-        pagamento.CommandText = """
-            INSERT INTO pagamentos (pedido_id, registrado_por_usuario_id, forma_pagamento, condicao_pagamento, valor_total, observacao)
-            SELECT id, @usuarioId, @formaPagamento, @condicaoPagamento, @valorEntrada, 'Conversão de orçamento em pedido'
-            FROM pedidos
-            WHERE id = @id;
-            """;
-        pagamento.Parameters.AddWithValue("@id", id);
-        pagamento.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
-        pagamento.Parameters.AddWithValue("@formaPagamento", NormalizarFormaPagamento(request.FormaPagamento));
-        pagamento.Parameters.AddWithValue("@condicaoPagamento", NormalizarCondicaoPagamento(request.CondicaoPagamento));
-        pagamento.Parameters.AddWithValue("@valorEntrada", request.ValorEntrada);
-        await pagamento.ExecuteNonQueryAsync(cancellationToken);
+        if (request.ValorEntrada > 0)
+        {
+            await GarantirColuna((MySqlConnection)connection, transaction, "pagamentos", "registrado_em", "ALTER TABLE pagamentos ADD COLUMN registrado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;", cancellationToken);
+            await using var pagamento = (MySqlCommand)connection.CreateCommand();
+            pagamento.Transaction = transaction;
+            pagamento.CommandText = """
+                INSERT INTO pagamentos (pedido_id, registrado_por_usuario_id, forma_pagamento, condicao_pagamento, valor_total, observacao)
+                SELECT id, @usuarioId, @formaPagamento, @condicaoPagamento, @valorEntrada, 'Conversão de orçamento em pedido'
+                FROM pedidos
+                WHERE id = @id;
+                """;
+            pagamento.Parameters.AddWithValue("@id", id);
+            pagamento.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
+            pagamento.Parameters.AddWithValue("@formaPagamento", NormalizarFormaPagamento(request.FormaPagamento));
+            pagamento.Parameters.AddWithValue("@condicaoPagamento", NormalizarCondicaoPagamento(request.CondicaoPagamento));
+            pagamento.Parameters.AddWithValue("@valorEntrada", request.ValorEntrada);
+            await pagamento.ExecuteNonQueryAsync(cancellationToken);
+        }
 
         return true;
     }
@@ -849,26 +872,6 @@ public sealed class PedidoRepository(IUnitOfWork unitOfWork) : IPedidoRepository
         };
     }
 
-    private static async Task GarantirColunaRegistradoEmPagamentos(MySqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var coluna = connection.CreateCommand();
-        coluna.CommandText = """
-            SELECT COUNT(*)
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME = 'pagamentos'
-              AND COLUMN_NAME = 'registrado_em';
-            """;
-        var existe = Convert.ToInt32(await coluna.ExecuteScalarAsync(cancellationToken)) > 0;
-        if (existe)
-        {
-            return;
-        }
-
-        await using var alter = connection.CreateCommand();
-        alter.CommandText = "ALTER TABLE pagamentos ADD COLUMN registrado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;";
-        await alter.ExecuteNonQueryAsync(cancellationToken);
-    }
 
     private static async Task GarantirEstruturaCancelamento(MySqlConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
     {

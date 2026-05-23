@@ -20,6 +20,7 @@ public sealed class UsuariosController(IUsuarioRepository usuarios) : Controller
             usuario.Id,
             usuario.Nome,
             usuario.Email,
+            usuario.Telefone,
             Perfil = usuario.Perfil.ToString().ToUpperInvariant(),
             Status = usuario.Status.ToString().ToUpperInvariant(),
             usuario.DeveTrocarSenha
