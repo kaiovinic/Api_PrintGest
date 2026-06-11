@@ -1,41 +1,33 @@
 using System.Data.Common;
-using Microsoft.Extensions.Configuration;
-using MySqlConnector;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using PrintGest.Application.Abstractions;
 
 namespace PrintGest.Infrastructure.Data;
 
 public sealed class UnitOfWork : IUnitOfWork
 {
-    private readonly string _connectionString;
-    private MySqlConnection? _connection;
-    private MySqlTransaction? _transaction;
+    private readonly PrintGestDbContext _context;
+    private IDbContextTransaction? _transaction;
     private bool _disposed;
 
-    public UnitOfWork(IConfiguration configuration)
+    public UnitOfWork(PrintGestDbContext context)
     {
-        _connectionString = configuration.GetConnectionString("PrintGest")
-            ?? throw new InvalidOperationException("Connection string 'PrintGest' não configurada.");
+        _context = context;
     }
 
     public async Task<DbConnection> GetConnectionAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-
-        if (_connection == null)
+        var connection = _context.Database.GetDbConnection();
+        if (connection.State == System.Data.ConnectionState.Closed)
         {
-            _connection = new MySqlConnection(_connectionString);
-            await _connection.OpenAsync(cancellationToken);
+            await connection.OpenAsync(cancellationToken);
         }
-        else if (_connection.State == System.Data.ConnectionState.Closed)
-        {
-            await _connection.OpenAsync(cancellationToken);
-        }
-
-        return _connection;
+        return connection;
     }
 
-    public DbTransaction? Transaction => _transaction;
+    public DbTransaction? Transaction => _transaction?.GetDbTransaction();
 
     public async Task<DbTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default)
     {
@@ -43,12 +35,11 @@ public sealed class UnitOfWork : IUnitOfWork
 
         if (_transaction != null)
         {
-            return _transaction;
+            return _transaction.GetDbTransaction();
         }
 
-        var connection = await GetConnectionAsync(cancellationToken);
-        _transaction = await ((MySqlConnection)connection).BeginTransactionAsync(cancellationToken);
-        return _transaction;
+        _transaction = await _context.Database.BeginTransactionAsync(cancellationToken);
+        return _transaction.GetDbTransaction();
     }
 
     public async Task CommitAsync(CancellationToken cancellationToken = default)
@@ -62,6 +53,7 @@ public sealed class UnitOfWork : IUnitOfWork
 
         try
         {
+            await _context.SaveChangesAsync(cancellationToken);
             await _transaction.CommitAsync(cancellationToken);
         }
         finally
@@ -103,7 +95,7 @@ public sealed class UnitOfWork : IUnitOfWork
         if (_disposed) return;
 
         _transaction?.Dispose();
-        _connection?.Dispose();
+        _context.Dispose();
         _disposed = true;
     }
 
@@ -117,12 +109,7 @@ public sealed class UnitOfWork : IUnitOfWork
             _transaction = null;
         }
 
-        if (_connection != null)
-        {
-            await _connection.DisposeAsync();
-            _connection = null;
-        }
-
+        await _context.DisposeAsync();
         _disposed = true;
     }
 }

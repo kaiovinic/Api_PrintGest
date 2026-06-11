@@ -1,4 +1,4 @@
-using MySqlConnector;
+using Microsoft.EntityFrameworkCore;
 using PrintGest.Application.Abstractions;
 using PrintGest.Domain.Entities;
 using PrintGest.Domain.Enums;
@@ -6,154 +6,97 @@ using PrintGest.Infrastructure.Data;
 
 namespace PrintGest.Infrastructure.Repositories;
 
-public sealed class UsuarioRepository(IUnitOfWork unitOfWork) : IUsuarioRepository
+public sealed class UsuarioRepository(PrintGestDbContext context) : IUsuarioRepository
 {
     public async Task<Usuario?> GetByIdAsync(long id, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            SELECT id, nome, email, telefone, senha_hash, perfil, status, deve_trocar_senha
-            FROM usuarios
-            WHERE id = @id
-            LIMIT 1;
-            """;
-        command.Parameters.Add(new MySqlParameter("@id", id));
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        return await reader.ReadAsync(cancellationToken) ? Map(reader) : null;
+        return await context.Usuarios
+            .FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
     }
 
     public async Task<Usuario?> GetByEmailAsync(string email, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            SELECT id, nome, email, telefone, senha_hash, perfil, status, deve_trocar_senha
-            FROM usuarios
-            WHERE email = @email
-            LIMIT 1;
-            """;
-        command.Parameters.Add(new MySqlParameter("@email", email));
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        return await reader.ReadAsync(cancellationToken) ? Map(reader) : null;
+        return await context.Usuarios
+            .FirstOrDefaultAsync(u => u.Email == email, cancellationToken);
     }
 
     public async Task<IReadOnlyList<Usuario>> ListAsync(UsuarioFiltro filtro, CancellationToken cancellationToken = default)
     {
-        var usuarios = new List<Usuario>();
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            SELECT id, nome, email, telefone, senha_hash, perfil, status, deve_trocar_senha
-            FROM usuarios
-            WHERE (@nome IS NULL OR nome LIKE CONCAT('%', @nome, '%'))
-              AND (@email IS NULL OR email LIKE CONCAT('%', @email, '%'))
-              AND (@perfil IS NULL OR perfil = @perfil)
-              AND (@status IS NULL OR status = @status)
-            ORDER BY nome;
-            """;
-        command.Parameters.AddWithValue("@nome", ToDb(filtro.Nome));
-        command.Parameters.AddWithValue("@email", ToDb(filtro.Email));
-        command.Parameters.AddWithValue("@perfil", ToDb(NormalizarEnum(filtro.Perfil)));
-        command.Parameters.AddWithValue("@status", ToDb(NormalizarEnum(filtro.Status)));
+        var query = context.Usuarios.AsNoTracking();
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        if (!string.IsNullOrWhiteSpace(filtro.Nome))
         {
-            usuarios.Add(Map(reader));
+            query = query.Where(u => u.Nome.Contains(filtro.Nome));
         }
 
-        return usuarios;
+        if (!string.IsNullOrWhiteSpace(filtro.Email))
+        {
+            query = query.Where(u => u.Email.Contains(filtro.Email));
+        }
+
+        if (Enum.TryParse<PerfilUsuario>(filtro.Perfil, true, out var perfil))
+        {
+            query = query.Where(u => u.Perfil == perfil);
+        }
+
+        if (Enum.TryParse<StatusUsuario>(filtro.Status, true, out var status))
+        {
+            query = query.Where(u => u.Status == status);
+        }
+
+        return await query.OrderBy(u => u.Nome).ToListAsync(cancellationToken);
     }
 
     public async Task<long> CreateAsync(Usuario usuario, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            INSERT INTO usuarios (nome, email, telefone, senha_hash, perfil, status, deve_trocar_senha)
-            VALUES (@nome, @email, @telefone, @senhaHash, @perfil, @status, @deveTrocarSenha);
-            SELECT LAST_INSERT_ID();
-            """;
-        command.Parameters.AddWithValue("@nome", usuario.Nome);
-        command.Parameters.AddWithValue("@email", usuario.Email);
-        command.Parameters.AddWithValue("@telefone", (object?)usuario.Telefone ?? DBNull.Value);
-        command.Parameters.AddWithValue("@senhaHash", usuario.SenhaHash);
-        command.Parameters.AddWithValue("@perfil", usuario.Perfil.ToString().ToUpperInvariant());
-        command.Parameters.AddWithValue("@status", usuario.Status.ToString().ToUpperInvariant());
-        command.Parameters.AddWithValue("@deveTrocarSenha", usuario.DeveTrocarSenha);
-
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+        context.Usuarios.Add(usuario);
+        await context.SaveChangesAsync(cancellationToken);
+        return usuario.Id;
     }
 
     public async Task<bool> UpdateAsync(Usuario usuario, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            UPDATE usuarios
-            SET nome = @nome, email = @email, telefone = @telefone, perfil = @perfil
-            WHERE id = @id;
-            """;
-        command.Parameters.AddWithValue("@id", usuario.Id);
-        command.Parameters.AddWithValue("@nome", usuario.Nome);
-        command.Parameters.AddWithValue("@email", usuario.Email);
-        command.Parameters.AddWithValue("@telefone", (object?)usuario.Telefone ?? DBNull.Value);
-        command.Parameters.AddWithValue("@perfil", usuario.Perfil.ToString().ToUpperInvariant());
+        var existing = await context.Usuarios.FindAsync(new object[] { usuario.Id }, cancellationToken);
+        if (existing == null)
+        {
+            return false;
+        }
 
-        return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
+        var updated = existing with
+        {
+            Nome = usuario.Nome,
+            Email = usuario.Email,
+            Telefone = usuario.Telefone,
+            Perfil = usuario.Perfil
+        };
+
+        context.Entry(existing).CurrentValues.SetValues(updated);
+        return await context.SaveChangesAsync(cancellationToken) > 0;
     }
 
     public async Task<bool> UpdateStatusAsync(long id, StatusUsuario status, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = "UPDATE usuarios SET status = @status WHERE id = @id;";
-        command.Parameters.AddWithValue("@id", id);
-        command.Parameters.AddWithValue("@status", status.ToString().ToUpperInvariant());
+        var existing = await context.Usuarios.FindAsync(new object[] { id }, cancellationToken);
+        if (existing == null)
+        {
+            return false;
+        }
 
-        return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
+        var updated = existing with { Status = status };
+        context.Entry(existing).CurrentValues.SetValues(updated);
+        return await context.SaveChangesAsync(cancellationToken) > 0;
     }
 
     public async Task<bool> UpdatePasswordAsync(long id, string senhaHash, bool deveTrocarSenha, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            UPDATE usuarios
-            SET senha_hash = @senhaHash, deve_trocar_senha = @deveTrocarSenha
-            WHERE id = @id;
-            """;
-        command.Parameters.AddWithValue("@id", id);
-        command.Parameters.AddWithValue("@senhaHash", senhaHash);
-        command.Parameters.AddWithValue("@deveTrocarSenha", deveTrocarSenha);
+        var existing = await context.Usuarios.FindAsync(new object[] { id }, cancellationToken);
+        if (existing == null)
+        {
+            return false;
+        }
 
-        return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
-    }
-
-    private static string? NormalizarEnum(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().ToUpperInvariant();
-
-    private static object ToDb(string? value) => string.IsNullOrWhiteSpace(value) ? DBNull.Value : value.Trim();
-
-    private static Usuario Map(MySqlDataReader reader)
-    {
-        return new Usuario(
-            reader.GetInt64("id"),
-            reader.GetString("nome"),
-            reader.GetString("email"),
-            reader.NullableString("telefone"),
-            reader.GetString("senha_hash"),
-            Mapping.Perfil(reader.GetString("perfil")),
-            Mapping.StatusUsuario(reader.GetString("status")),
-            reader.GetBoolean("deve_trocar_senha"));
+        var updated = existing with { SenhaHash = senhaHash, DeveTrocarSenha = deveTrocarSenha };
+        context.Entry(existing).CurrentValues.SetValues(updated);
+        return await context.SaveChangesAsync(cancellationToken) > 0;
     }
 }

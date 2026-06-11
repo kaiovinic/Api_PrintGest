@@ -31,6 +31,7 @@ public sealed class AuthController(IAuthService authService, IUsuarioRepository 
             : Ok(response);
     }
 
+    [Authorize]
     [HttpPatch("trocar-senha")]
     public async Task<IActionResult> TrocarSenha(
         [FromBody] TrocarSenhaRequest request,

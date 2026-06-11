@@ -1,301 +1,176 @@
-using System.Data.Common;
-using MySqlConnector;
+using Microsoft.EntityFrameworkCore;
 using PrintGest.Application.Abstractions;
+using PrintGest.Domain.Entities;
 using PrintGest.Infrastructure.Data;
 
 namespace PrintGest.Infrastructure.Repositories;
 
-public sealed class CaixaRepository(IUnitOfWork unitOfWork) : ICaixaRepository
+public sealed class CaixaRepository(PrintGestDbContext context) : ICaixaRepository
 {
     public async Task<CaixaResumoDto> ObterResumoAsync(DateOnly? inicio, DateOnly? fim, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirEstruturaCaixa(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
-        var periodo = ResolverPeriodo(inicio, fim);
+        var (dtInicio, dtFim) = ResolverPeriodo(inicio, fim);
 
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            SELECT
-                COALESCE(SUM(CASE WHEN tipo = 'ENTRADA' THEN valor ELSE 0 END), 0) AS entradas,
-                COALESCE(SUM(CASE WHEN tipo = 'SAIDA' THEN valor ELSE 0 END), 0) AS saidas,
-                COALESCE(SUM(CASE WHEN tipo = 'ENTRADA' AND forma_pagamento = 'DINHEIRO' THEN valor ELSE 0 END), 0) AS dinheiro,
-                COALESCE(SUM(CASE WHEN tipo = 'ENTRADA' AND forma_pagamento = 'PIX' THEN valor ELSE 0 END), 0) AS pix,
-                COALESCE(SUM(CASE WHEN tipo = 'ENTRADA' AND forma_pagamento = 'CARTAO_CREDITO' THEN valor ELSE 0 END), 0) AS cartao_credito,
-                COALESCE(SUM(CASE WHEN tipo = 'ENTRADA' AND forma_pagamento = 'CARTAO_DEBITO' THEN valor ELSE 0 END), 0) AS cartao_debito
-            FROM (
-                SELECT 'ENTRADA' AS tipo, forma_pagamento, valor_total AS valor, registrado_em AS data_movimento
-                FROM pagamentos
-                UNION ALL
-                SELECT tipo, forma_pagamento, valor, movimentado_em AS data_movimento
-                FROM caixa_movimentacoes
-            ) caixa
-            WHERE data_movimento BETWEEN @inicio AND @fim;
-            """;
-        command.Parameters.AddWithValue("@inicio", periodo.Inicio);
-        command.Parameters.AddWithValue("@fim", periodo.Fim);
+        var pagamentosQuery = context.Pagamentos
+            .Where(p => p.RegistradoEm >= dtInicio && p.RegistradoEm <= dtFim)
+            .Select(p => new { Tipo = "ENTRADA", FormaPagamento = p.FormaPagamento, Valor = p.ValorTotal });
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        await reader.ReadAsync(cancellationToken);
-        var entradas = reader.GetDecimal("entradas");
-        var saidas = reader.GetDecimal("saidas");
-        return new CaixaResumoDto(
-            entradas,
-            saidas,
-            entradas - saidas,
-            reader.GetDecimal("dinheiro"),
-            reader.GetDecimal("pix"),
-            reader.GetDecimal("cartao_credito"),
-            reader.GetDecimal("cartao_debito"));
+        var manualQuery = context.CaixaMovimentacoes
+            .Where(m => m.MovimentadoEm >= dtInicio && m.MovimentadoEm <= dtFim)
+            .Select(m => new { Tipo = m.Tipo, FormaPagamento = m.FormaPagamento, Valor = m.Valor });
+
+        var combined = await pagamentosQuery.Union(manualQuery).ToListAsync(cancellationToken);
+
+        decimal entradas = combined.Where(x => x.Tipo == "ENTRADA").Sum(x => x.Valor);
+        decimal saidas = combined.Where(x => x.Tipo == "SAIDA").Sum(x => x.Valor);
+        decimal saldo = entradas - saidas;
+
+        decimal dinheiro = combined.Where(x => x.Tipo == "ENTRADA" && x.FormaPagamento == "DINHEIRO").Sum(x => x.Valor);
+        decimal pix = combined.Where(x => x.Tipo == "ENTRADA" && x.FormaPagamento == "PIX").Sum(x => x.Valor);
+        decimal cartaoCredito = combined.Where(x => x.Tipo == "ENTRADA" && x.FormaPagamento == "CARTAO_CREDITO").Sum(x => x.Valor);
+        decimal cartaoDebito = combined.Where(x => x.Tipo == "ENTRADA" && x.FormaPagamento == "CARTAO_DEBITO").Sum(x => x.Valor);
+
+        return new CaixaResumoDto(entradas, saidas, saldo, dinheiro, pix, cartaoCredito, cartaoDebito);
     }
 
     public async Task<ResultadoPaginado<CaixaMovimentacaoDto>> ListarMovimentacoesAsync(DateOnly? inicio, DateOnly? fim, int pagina, int tamanhoPagina, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirEstruturaCaixa(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
-        var periodo = ResolverPeriodo(inicio, fim);
-        var paging = NormalizarPaginacao(pagina, tamanhoPagina);
+        var (dtInicio, dtFim) = ResolverPeriodo(inicio, fim);
+        var page = Math.Max(pagina, 1);
+        var size = Math.Clamp(tamanhoPagina, 5, 100);
+        var offset = (page - 1) * size;
 
-        await using var totalCommand = (MySqlCommand)connection.CreateCommand();
-        totalCommand.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        totalCommand.CommandText = """
-            SELECT COUNT(*)
-            FROM (
-                SELECT registrado_em AS data_movimento FROM pagamentos
-                UNION ALL
-                SELECT movimentado_em AS data_movimento FROM caixa_movimentacoes
-            ) caixa
-            WHERE data_movimento BETWEEN @inicio AND @fim;
-            """;
-        totalCommand.Parameters.AddWithValue("@inicio", periodo.Inicio);
-        totalCommand.Parameters.AddWithValue("@fim", periodo.Fim);
-        var total = Convert.ToInt32(await totalCommand.ExecuteScalarAsync(cancellationToken));
+        var pagamentosListQuery = from p in context.Pagamentos
+                                  join ped in context.Pedidos on p.PedidoId equals ped.Id
+                                  join c in context.Clientes on ped.ClienteId equals c.Id
+                                  join u in context.Usuarios on p.RegistradoPorUsuarioId equals u.Id
+                                  where p.RegistradoEm >= dtInicio && p.RegistradoEm <= dtFim
+                                  select new {
+                                      Id = "PAG-" + p.Id,
+                                      Tipo = "ENTRADA",
+                                      FormaPagamento = p.FormaPagamento,
+                                      Categoria = "Pedido",
+                                      Descricao = "Pagamento do pedido " + ped.Numero + " - " + c.Nome,
+                                      Valor = p.ValorTotal,
+                                      MovimentadoEm = p.RegistradoEm,
+                                      Usuario = u.Nome,
+                                      Observacao = p.Observacao,
+                                      Origem = "PEDIDO"
+                                  };
 
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            SELECT *
-            FROM (
-                SELECT
-                    CONCAT('PAG-', p.id) AS id,
-                    'ENTRADA' AS tipo,
-                    p.forma_pagamento,
-                    'Pedido' AS categoria,
-                    CONCAT('Pagamento do pedido ', ped.numero, ' - ', c.nome) AS descricao,
-                    p.valor_total AS valor,
-                    p.registrado_em AS movimentado_em,
-                    u.nome AS usuario,
-                    p.observacao,
-                    'PEDIDO' AS origem
-                FROM pagamentos p
-                INNER JOIN pedidos ped ON ped.id = p.pedido_id
-                INNER JOIN clientes c ON c.id = ped.cliente_id
-                INNER JOIN usuarios u ON u.id = p.registrado_por_usuario_id
-                UNION ALL
-                SELECT
-                    CONCAT('CX-', m.id) AS id,
-                    m.tipo,
-                    m.forma_pagamento,
-                    m.categoria,
-                    m.descricao,
-                    m.valor,
-                    m.movimentado_em,
-                    u.nome AS usuario,
-                    m.observacao,
-                    'MANUAL' AS origem
-                FROM caixa_movimentacoes m
-                INNER JOIN usuarios u ON u.id = m.usuario_id
-            ) caixa
-            WHERE movimentado_em BETWEEN @inicio AND @fim
-            ORDER BY movimentado_em DESC
-            LIMIT @limit OFFSET @offset;
-            """;
-        command.Parameters.AddWithValue("@inicio", periodo.Inicio);
-        command.Parameters.AddWithValue("@fim", periodo.Fim);
-        command.Parameters.AddWithValue("@limit", paging.TamanhoPagina);
-        command.Parameters.AddWithValue("@offset", paging.Offset);
+        var manualListQuery = from m in context.CaixaMovimentacoes
+                              join u in context.Usuarios on m.UsuarioId equals u.Id
+                              where m.MovimentadoEm >= dtInicio && m.MovimentadoEm <= dtFim
+                              select new {
+                                  Id = "CX-" + m.Id,
+                                  Tipo = m.Tipo,
+                                  FormaPagamento = m.FormaPagamento,
+                                  Categoria = m.Categoria,
+                                  Descricao = m.Descricao,
+                                  Valor = m.Valor,
+                                  MovimentadoEm = m.MovimentadoEm,
+                                  Usuario = u.Nome,
+                                  Observacao = m.Observacao,
+                                  Origem = "MANUAL"
+                              };
 
-        var movimentacoes = new List<CaixaMovimentacaoDto>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            movimentacoes.Add(new CaixaMovimentacaoDto(
-                reader.GetString("id"),
-                reader.GetString("tipo"),
-                reader.GetString("forma_pagamento"),
-                reader.GetString("categoria"),
-                reader.GetString("descricao"),
-                reader.GetDecimal("valor"),
-                reader.GetDateTime("movimentado_em"),
-                reader.GetString("usuario"),
-                reader.NullableString("observacao"),
-                reader.GetString("origem")));
-        }
+        var combinedQuery = pagamentosListQuery.Union(manualListQuery);
 
-        return CriarResultado(movimentacoes, total, paging.Pagina, paging.TamanhoPagina);
+        var total = await combinedQuery.CountAsync(cancellationToken);
+        var totalPaginas = total == 0 ? 1 : (int)Math.Ceiling(total / (double)size);
+
+        var items = await combinedQuery
+            .OrderByDescending(x => x.MovimentadoEm)
+            .Skip(offset)
+            .Take(size)
+            .ToListAsync(cancellationToken);
+
+        var dtos = items.Select(x => new CaixaMovimentacaoDto(
+            x.Id,
+            x.Tipo,
+            x.FormaPagamento,
+            x.Categoria,
+            x.Descricao,
+            x.Valor,
+            x.MovimentadoEm,
+            x.Usuario,
+            x.Observacao,
+            x.Origem
+        )).ToList();
+
+        return new ResultadoPaginado<CaixaMovimentacaoDto>(dtos, total, page, size, totalPaginas);
     }
 
     public async Task<long> CriarMovimentacaoAsync(CaixaMovimentacaoRequest request, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirEstruturaCaixa(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
         var tipo = request.Tipo.ToUpperInvariant();
         if (tipo == "ENTRADA" && request.PedidoId is not null)
         {
-            return await RegistrarPagamentoPedido(unitOfWork, request, cancellationToken);
+            return await RegistrarPagamentoPedido(request, cancellationToken);
         }
 
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            INSERT INTO caixa_movimentacoes
-                (tipo, forma_pagamento, categoria, descricao, valor, usuario_id, observacao)
-            VALUES
-                (@tipo, @formaPagamento, @categoria, @descricao, @valor, @usuarioId, @observacao);
-            SELECT LAST_INSERT_ID();
-            """;
-        command.Parameters.AddWithValue("@tipo", tipo);
-        command.Parameters.AddWithValue("@formaPagamento", NormalizarFormaPagamento(request.FormaPagamento));
-        command.Parameters.AddWithValue("@categoria", request.Categoria.Trim());
-        command.Parameters.AddWithValue("@descricao", request.Descricao.Trim());
-        command.Parameters.AddWithValue("@valor", request.Valor);
-        command.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
-        command.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+        var movimentacao = new CaixaMovimentacao(
+            0,
+            request.PedidoId,
+            tipo,
+            NormalizarFormaPagamento(request.FormaPagamento),
+            request.Categoria.Trim(),
+            request.Descricao.Trim(),
+            request.Valor,
+            request.UsuarioId,
+            request.Observacao,
+            DateTime.UtcNow
+        );
+
+        context.CaixaMovimentacoes.Add(movimentacao);
+        await context.SaveChangesAsync(cancellationToken);
+        return movimentacao.Id;
     }
 
-    private static async Task<long> RegistrarPagamentoPedido(IUnitOfWork unitOfWork, CaixaMovimentacaoRequest request, CancellationToken cancellationToken)
+    private async Task<long> RegistrarPagamentoPedido(CaixaMovimentacaoRequest request, CancellationToken cancellationToken)
     {
-        var transacaoCriada = false;
-        var transaction = unitOfWork.Transaction;
-        if (transaction == null)
+        var pedido = await context.Pedidos.FirstOrDefaultAsync(p => p.Id == request.PedidoId!.Value, cancellationToken);
+        if (pedido == null)
         {
-            transaction = await unitOfWork.BeginTransactionAsync(cancellationToken);
-            transacaoCriada = true;
+            throw new InvalidOperationException("Pedido nao encontrado.");
         }
 
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-
-        try
+        if (pedido.Tipo != "PEDIDO")
         {
-            await using var consulta = (MySqlCommand)connection.CreateCommand();
-            consulta.Transaction = (MySqlTransaction)transaction;
-            consulta.CommandText = """
-                SELECT tipo, status, valor_pago, saldo_devedor
-                FROM pedidos
-                WHERE id = @pedidoId
-                LIMIT 1
-                FOR UPDATE;
-                """;
-            consulta.Parameters.AddWithValue("@pedidoId", request.PedidoId);
-
-            decimal valorPago;
-            decimal saldoDevedor;
-            await using (var reader = await consulta.ExecuteReaderAsync(cancellationToken))
-            {
-                if (!await reader.ReadAsync(cancellationToken)) throw new InvalidOperationException("Pedido nao encontrado.");
-                var tipoPedido = reader.GetString("tipo");
-                var statusPedido = reader.GetString("status");
-                valorPago = reader.GetDecimal("valor_pago");
-                saldoDevedor = reader.GetDecimal("saldo_devedor");
-
-                if (tipoPedido != "PEDIDO") throw new InvalidOperationException("Somente pedidos podem receber pagamento no caixa.");
-                if (statusPedido is "CANCELADO" or "FINALIZADO") throw new InvalidOperationException("Nao e possivel registrar pagamento para pedido cancelado ou finalizado.");
-                if (request.Valor > saldoDevedor) throw new InvalidOperationException("O valor informado e maior que o saldo devedor do pedido.");
-            }
-
-            await using var pagamento = (MySqlCommand)connection.CreateCommand();
-            pagamento.Transaction = (MySqlTransaction)transaction;
-            pagamento.CommandText = """
-                INSERT INTO pagamentos (pedido_id, registrado_por_usuario_id, forma_pagamento, condicao_pagamento, valor_total, observacao)
-                VALUES (@pedidoId, @usuarioId, @formaPagamento, 'PAGAMENTO_NO_PEDIDO', @valorTotal, @observacao);
-                SELECT LAST_INSERT_ID();
-                """;
-            pagamento.Parameters.AddWithValue("@pedidoId", request.PedidoId);
-            pagamento.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
-            pagamento.Parameters.AddWithValue("@formaPagamento", NormalizarFormaPagamento(request.FormaPagamento));
-            pagamento.Parameters.AddWithValue("@valorTotal", request.Valor);
-            pagamento.Parameters.AddWithValue("@observacao", ToDb(request.Observacao ?? request.Descricao));
-            var id = Convert.ToInt64(await pagamento.ExecuteScalarAsync(cancellationToken));
-
-            await using var pedido = (MySqlCommand)connection.CreateCommand();
-            pedido.Transaction = (MySqlTransaction)transaction;
-            pedido.CommandText = """
-                UPDATE pedidos
-                SET valor_pago = @valorPago,
-                    saldo_devedor = @saldoDevedor
-                WHERE id = @pedidoId;
-                """;
-            pedido.Parameters.AddWithValue("@pedidoId", request.PedidoId);
-            pedido.Parameters.AddWithValue("@valorPago", valorPago + request.Valor);
-            pedido.Parameters.AddWithValue("@saldoDevedor", saldoDevedor - request.Valor);
-            await pedido.ExecuteNonQueryAsync(cancellationToken);
-
-            if (transacaoCriada)
-            {
-                await unitOfWork.CommitAsync(cancellationToken);
-            }
-            return id;
+            throw new InvalidOperationException("Somente pedidos podem receber pagamento no caixa.");
         }
-        catch
+
+        if (pedido.Status is "CANCELADO" or "FINALIZADO")
         {
-            if (transacaoCriada)
-            {
-                await unitOfWork.RollbackAsync(cancellationToken);
-            }
-            throw;
+            throw new InvalidOperationException("Nao e possivel registrar pagamento para pedido cancelado ou finalizado.");
         }
-    }
 
-    private static async Task GarantirEstruturaCaixa(DbConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
-    {
-        await GarantirColunaRegistradoEmPagamentos(connection, transaction, cancellationToken);
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            CREATE TABLE IF NOT EXISTS caixa_movimentacoes (
-                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                pedido_id BIGINT UNSIGNED NULL,
-                tipo VARCHAR(20) NOT NULL,
-                forma_pagamento VARCHAR(30) NOT NULL,
-                categoria VARCHAR(120) NOT NULL,
-                descricao VARCHAR(255) NOT NULL,
-                valor DECIMAL(10,2) NOT NULL,
-                usuario_id BIGINT UNSIGNED NOT NULL,
-                observacao VARCHAR(300) NULL,
-                movimentado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                CONSTRAINT fk_caixa_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
-            );
-            """;
-        await command.ExecuteNonQueryAsync(cancellationToken);
-        await GarantirColuna(connection, transaction, "caixa_movimentacoes", "pedido_id", "ALTER TABLE caixa_movimentacoes ADD COLUMN pedido_id BIGINT UNSIGNED NULL AFTER id;", cancellationToken);
-    }
+        if (request.Valor > pedido.SaldoDevedor)
+        {
+            throw new InvalidOperationException("O valor informado e maior que o saldo devedor do pedido.");
+        }
 
-    private static async Task GarantirColunaRegistradoEmPagamentos(DbConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
-    {
-        await GarantirColuna(connection, transaction, "pagamentos", "registrado_em", "ALTER TABLE pagamentos ADD COLUMN registrado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;", cancellationToken);
-    }
+        var pagamento = new Pagamento(
+            0,
+            request.PedidoId!.Value,
+            request.UsuarioId,
+            NormalizarFormaPagamento(request.FormaPagamento),
+            "PAGAMENTO_NO_PEDIDO",
+            request.Valor,
+            request.Observacao ?? request.Descricao,
+            DateTime.UtcNow
+        );
+        context.Pagamentos.Add(pagamento);
 
-    private static async Task GarantirColuna(DbConnection connection, MySqlTransaction? transaction, string tabela, string coluna, string alterSql, CancellationToken cancellationToken)
-    {
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT COUNT(*)
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME = @tabela
-              AND COLUMN_NAME = @coluna;
-            """;
-        command.Parameters.AddWithValue("@tabela", tabela);
-        command.Parameters.AddWithValue("@coluna", coluna);
-        var existe = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)) > 0;
-        if (existe) return;
-        await using var alter = (MySqlCommand)connection.CreateCommand();
-        alter.Transaction = transaction;
-        alter.CommandText = alterSql;
-        try { await alter.ExecuteNonQueryAsync(cancellationToken); }
-        catch (MySqlException exception) when (exception.Number == 1060) { }
+        var updatedPedido = pedido with
+        {
+            ValorPago = pedido.ValorPago + request.Valor,
+            SaldoDevedor = pedido.SaldoDevedor - request.Valor
+        };
+        context.Entry(pedido).CurrentValues.SetValues(updatedPedido);
+
+        await context.SaveChangesAsync(cancellationToken);
+        return pagamento.Id;
     }
 
     private static (DateTime Inicio, DateTime Fim) ResolverPeriodo(DateOnly? inicio, DateOnly? fim)
@@ -316,19 +191,4 @@ public sealed class CaixaRepository(IUnitOfWork unitOfWork) : ICaixaRepository
             _ => formaPagamento.Trim().ToUpperInvariant()
         };
     }
-
-    private static (int Pagina, int TamanhoPagina, int Offset) NormalizarPaginacao(int pagina, int tamanhoPagina)
-    {
-        var page = Math.Max(pagina, 1);
-        var size = Math.Clamp(tamanhoPagina, 5, 100);
-        return (page, size, (page - 1) * size);
-    }
-
-    private static ResultadoPaginado<T> CriarResultado<T>(IReadOnlyList<T> itens, int total, int pagina, int tamanhoPagina)
-    {
-        var totalPaginas = total == 0 ? 1 : (int)Math.Ceiling(total / (double)tamanhoPagina);
-        return new ResultadoPaginado<T>(itens, total, pagina, tamanhoPagina, totalPaginas);
-    }
-
-    private static object ToDb(string? value) => string.IsNullOrWhiteSpace(value) ? DBNull.Value : value.Trim();
 }

@@ -1,616 +1,437 @@
-using System.Data.Common;
-using MySqlConnector;
+using Microsoft.EntityFrameworkCore;
 using PrintGest.Application.Abstractions;
+using PrintGest.Domain.Entities;
 using PrintGest.Infrastructure.Data;
 
 namespace PrintGest.Infrastructure.Repositories;
 
-public sealed class FinanceiroRepository(IUnitOfWork unitOfWork) : IFinanceiroRepository
+public sealed class FinanceiroRepository(PrintGestDbContext context) : IFinanceiroRepository
 {
     public async Task<FinanceiroVendasResult> ObterVendasAsync(FinanceiroFiltro filtro, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
-        var periodo = ResolverPeriodo(filtro);
+        var (inicioDate, fimDate) = ResolverPeriodo(filtro.Inicio, filtro.Fim, filtro.Ano, filtro.Mes);
+        var page = Math.Max(filtro.Pagina, 1);
+        var size = Math.Clamp(filtro.TamanhoPagina, 5, 100);
+        var offset = (page - 1) * size;
 
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            SELECT p.id,
-                   p.numero,
-                   c.nome AS cliente,
-                   p.tipo,
-                   p.status,
-                   p.data_pedido,
-                   p.data_entrega,
-                   p.total,
-                   p.valor_pago,
-                   p.valor_estornado,
-                   p.saldo_devedor,
-                   u.nome AS criado_por,
-                   p.motivo_cancelamento
-            FROM pedidos p
-            INNER JOIN clientes c ON c.id = p.cliente_id
-            INNER JOIN usuarios u ON u.id = p.criado_por_usuario_id
-            WHERE p.tipo = 'PEDIDO'
-              AND p.data_pedido BETWEEN @inicio AND @fim
-              AND (@status IS NULL OR p.status = @status)
-            ORDER BY p.data_pedido DESC, p.id DESC;
-            """;
-        PreencherFiltros(command, periodo, filtro.Status);
+        var salesQuery = context.Pedidos
+            .Where(p => p.Tipo == "PEDIDO" && p.DataPedido >= inicioDate && p.DataPedido <= fimDate);
 
-        var pedidos = new List<FinanceiroPedido>();
-        decimal total = 0;
-        decimal pago = 0;
-        decimal saldo = 0;
-        decimal devolvido = 0;
-        var devolucoes = 0;
-        var emAndamento = 0;
+        var salesStats = await salesQuery
+            .GroupBy(p => 1)
+            .Select(g => new {
+                TotalVendas = g.Sum(p => p.Total),
+                ValorRecebido = g.Sum(p => p.ValorPago),
+                ValorPendente = g.Sum(p => p.SaldoDevedor),
+                QuantidadePedidos = g.Count(),
+                QuantidadeDevolucoes = g.Count(p => p.Status == "CANCELADO" && p.ValorEstornado > 0),
+                ValorDevolvido = g.Sum(p => p.ValorEstornado),
+                PedidosEmAndamento = g.Count(p => p.Status == "ABERTO")
+            })
+            .FirstOrDefaultAsync(cancellationToken);
 
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var todayStart = today.ToDateTime(TimeOnly.MinValue);
+        var todayEnd = today.ToDateTime(TimeOnly.MaxValue);
+        
+        var todayPayments = await context.Pagamentos
+            .Where(p => p.RegistradoEm >= todayStart && p.RegistradoEm <= todayEnd)
+            .SumAsync(p => p.ValorTotal, cancellationToken);
+            
+        var todayManual = await context.CaixaMovimentacoes
+            .Where(m => m.Tipo == "ENTRADA" && m.MovimentadoEm >= todayStart && m.MovimentadoEm <= todayEnd)
+            .SumAsync(m => m.Valor, cancellationToken);
+            
+        var valorEntrouHoje = todayPayments + todayManual;
+
+        var resumen = salesStats != null 
+            ? new FinanceiroVendasResumo(
+                salesStats.TotalVendas,
+                salesStats.ValorRecebido,
+                salesStats.ValorPendente,
+                salesStats.QuantidadePedidos,
+                salesStats.QuantidadeDevolucoes,
+                salesStats.ValorDevolvido,
+                salesStats.PedidosEmAndamento,
+                valorEntrouHoje)
+            : new FinanceiroVendasResumo(0, 0, 0, 0, 0, 0, 0, valorEntrouHoje);
+
+        var listQuery = from p in context.Pedidos
+                        join c in context.Clientes on p.ClienteId equals c.Id
+                        join u in context.Usuarios on p.CriadoPorUsuarioId equals u.Id
+                        where p.Tipo == "PEDIDO" && p.DataPedido >= inicioDate && p.DataPedido <= fimDate
+                        select new { p, ClienteNome = c.Nome, CriadoPorNome = u.Nome };
+
+        if (!string.IsNullOrWhiteSpace(filtro.Status))
         {
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                var dataPedido = DateOnly.FromDateTime(reader.GetDateTime("data_pedido"));
-                var valorPago = reader.GetDecimal("valor_pago");
-                var valorEstornado = reader.GetDecimal("valor_estornado");
-                var saldoDevedor = reader.GetDecimal("saldo_devedor");
-                var statusPedido = reader.GetString("status");
-                total += reader.GetDecimal("total");
-                pago += valorPago;
-                saldo += saldoDevedor;
-                devolvido += valorEstornado;
-                if (valorEstornado > 0) devolucoes++;
-                if (statusPedido == "ABERTO") emAndamento++;
+            listQuery = listQuery.Where(q => q.p.Status == filtro.Status);
+        }
 
-                pedidos.Add(new FinanceiroPedido(
-                    reader.GetInt64("id"),
-                    reader.GetString("numero"),
-                    reader.GetString("cliente"),
-                    reader.GetString("tipo"),
-                    statusPedido,
-                    dataPedido,
-                    GetNullableDateOnly(reader, "data_entrega"),
-                    reader.GetDecimal("total"),
-                    valorPago,
-                    valorEstornado,
-                    saldoDevedor,
-                    reader.GetString("criado_por"),
-                    reader.NullableString("motivo_cancelamento")));
-            }
-        } // reader fechado aqui — libera a conexão para o próximo comando
+        var total = await listQuery.CountAsync(cancellationToken);
+        var totalPaginas = total == 0 ? 1 : (int)Math.Ceiling(total / (double)size);
 
-        // Calcula "entrou hoje" somando pagamentos registrados hoje (mesma lógica do endpoint de entradas)
-        await using var hojeCommand = (MySqlCommand)connection.CreateCommand();
-        hojeCommand.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        hojeCommand.CommandText = """
-            SELECT COALESCE(SUM(valor), 0)
-            FROM (
-                SELECT valor_total AS valor
-                FROM pagamentos
-                WHERE DATE(registrado_em) = CURDATE()
-                UNION ALL
-                SELECT valor
-                FROM caixa_movimentacoes
-                WHERE tipo = 'ENTRADA' AND DATE(movimentado_em) = CURDATE()
-            ) hoje;
-            """;
-        var entrouHoje = Convert.ToDecimal(await hojeCommand.ExecuteScalarAsync(cancellationToken));
+        var listItems = await listQuery
+            .OrderByDescending(q => q.p.DataPedido)
+            .ThenByDescending(q => q.p.Id)
+            .Skip(offset)
+            .Take(size)
+            .ToListAsync(cancellationToken);
+
+        var financeiroPedidos = listItems.Select(x => new FinanceiroPedido(
+            x.p.Id,
+            x.p.Numero,
+            x.ClienteNome,
+            x.p.Tipo,
+            x.p.Status,
+            x.p.DataPedido,
+            x.p.DataEntrega,
+            x.p.Total,
+            x.p.ValorPago,
+            x.p.ValorEstornado,
+            x.p.SaldoDevedor,
+            x.CriadoPorNome,
+            x.p.MotivoCancelamento
+        )).ToList();
 
         return new FinanceiroVendasResult(
-            new FinanceiroPeriodo(DateOnly.FromDateTime(periodo.Inicio), DateOnly.FromDateTime(periodo.Fim.Date)),
-            new FinanceiroVendasResumo(total, pago, saldo, pedidos.Count, devolucoes, devolvido, emAndamento, entrouHoje),
-            Paginar(pedidos, filtro.Pagina, filtro.TamanhoPagina));
+            new FinanceiroPeriodo(inicioDate, fimDate),
+            resumen,
+            new ResultadoPaginado<FinanceiroPedido>(financeiroPedidos, total, page, size, totalPaginas)
+        );
     }
 
     public async Task<FinanceiroEntradasResult> ObterEntradasAsync(FinanceiroFiltro filtro, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
-        var periodo = ResolverPeriodo(filtro);
+        var (inicioDate, fimDate) = ResolverPeriodo(filtro.Inicio, filtro.Fim, filtro.Ano, filtro.Mes);
+        var page = Math.Max(filtro.Pagina, 1);
+        var size = Math.Clamp(filtro.TamanhoPagina, 5, 100);
+        var offset = (page - 1) * size;
 
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            SELECT *
-            FROM (
-                SELECT 'PAGAMENTO' AS origem, p.forma_pagamento, p.valor_total AS valor, p.registrado_em AS data_movimento,
-                       CONCAT('Pagamento do pedido ', ped.numero, ' - ', c.nome) AS descricao, u.nome AS usuario
-                FROM pagamentos p
-                INNER JOIN pedidos ped ON ped.id = p.pedido_id
-                INNER JOIN clientes c ON c.id = ped.cliente_id
-                INNER JOIN usuarios u ON u.id = p.registrado_por_usuario_id
-                UNION ALL
-                SELECT 'CAIXA' AS origem, m.forma_pagamento, m.valor, m.movimentado_em AS data_movimento,
-                       m.descricao, u.nome AS usuario
-                FROM caixa_movimentacoes m
-                INNER JOIN usuarios u ON u.id = m.usuario_id
-                WHERE m.tipo = 'ENTRADA'
-            ) entradas
-            WHERE data_movimento BETWEEN @inicio AND @fim
-            ORDER BY data_movimento DESC;
-            """;
-        command.Parameters.AddWithValue("@inicio", periodo.Inicio);
-        command.Parameters.AddWithValue("@fim", periodo.Fim);
+        var startDateTime = inicioDate.ToDateTime(TimeOnly.MinValue);
+        var endDateTime = fimDate.ToDateTime(TimeOnly.MaxValue);
 
-        var itens = new List<FinanceiroEntrada>();
-        decimal dinheiro = 0;
-        decimal pix = 0;
-        decimal credito = 0;
-        decimal debito = 0;
-        decimal hojeTotal = 0;
-        var hoje = DateOnly.FromDateTime(DateTime.Today);
+        var pagQuery = from p in context.Pagamentos
+                       join ped in context.Pedidos on p.PedidoId equals ped.Id
+                       join c in context.Clientes on ped.ClienteId equals c.Id
+                       join u in context.Usuarios on p.RegistradoPorUsuarioId equals u.Id
+                       where p.RegistradoEm >= startDateTime && p.RegistradoEm <= endDateTime
+                       select new {
+                           Origem = "PAGAMENTO",
+                           FormaPagamento = p.FormaPagamento,
+                           Valor = p.ValorTotal,
+                           Data = p.RegistradoEm,
+                           Descricao = "Pagamento do pedido " + ped.Numero + " - " + c.Nome,
+                           Usuario = u.Nome
+                       };
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            var forma = reader.GetString("forma_pagamento");
-            var valor = reader.GetDecimal("valor");
-            var data = reader.GetDateTime("data_movimento");
-            if (forma == "DINHEIRO") dinheiro += valor;
-            if (forma == "PIX") pix += valor;
-            if (forma == "CARTAO_CREDITO") credito += valor;
-            if (forma == "CARTAO_DEBITO") debito += valor;
-            if (DateOnly.FromDateTime(data) == hoje) hojeTotal += valor;
+        var manQuery = from m in context.CaixaMovimentacoes
+                       join u in context.Usuarios on m.UsuarioId equals u.Id
+                       where m.Tipo == "ENTRADA" && m.MovimentadoEm >= startDateTime && m.MovimentadoEm <= endDateTime
+                       select new {
+                           Origem = "CAIXA",
+                           FormaPagamento = m.FormaPagamento,
+                           Valor = m.Valor,
+                           Data = m.MovimentadoEm,
+                           Descricao = m.Descricao,
+                           Usuario = u.Nome
+                       };
 
-            itens.Add(new FinanceiroEntrada(
-                reader.GetString("origem"),
-                forma,
-                valor,
-                data,
-                reader.GetString("descricao"),
-                reader.GetString("usuario")));
-        }
+        var combinedQuery = pagQuery.Union(manQuery);
+        var combinedList = await combinedQuery.ToListAsync(cancellationToken);
+
+        decimal totalSum = combinedList.Sum(x => x.Valor);
+        decimal dinheiro = combinedList.Where(x => x.FormaPagamento == "DINHEIRO").Sum(x => x.Valor);
+        decimal pix = combinedList.Where(x => x.FormaPagamento == "PIX").Sum(x => x.Valor);
+        decimal cartaoCredito = combinedList.Where(x => x.FormaPagamento == "CARTAO_CREDITO").Sum(x => x.Valor);
+        decimal cartaoDebito = combinedList.Where(x => x.FormaPagamento == "CARTAO_DEBITO").Sum(x => x.Valor);
+
+        var today = DateTime.Today;
+        var tomorrow = today.AddDays(1);
+        decimal entrouHoje = combinedList.Where(x => x.Data >= today && x.Data < tomorrow).Sum(x => x.Valor);
+
+        var resumen = new FinanceiroEntradasResumo(totalSum, dinheiro, pix, cartaoCredito, cartaoDebito, entrouHoje);
+
+        var total = combinedList.Count;
+        var totalPaginas = total == 0 ? 1 : (int)Math.Ceiling(total / (double)size);
+
+        var items = combinedList
+            .OrderByDescending(x => x.Data)
+            .Skip(offset)
+            .Take(size)
+            .Select(x => new FinanceiroEntrada(x.Origem, x.FormaPagamento, x.Valor, x.Data, x.Descricao, x.Usuario))
+            .ToList();
 
         return new FinanceiroEntradasResult(
-            new FinanceiroEntradasResumo(dinheiro + pix + credito + debito, dinheiro, pix, credito, debito, hojeTotal),
-            Paginar(itens, filtro.Pagina, filtro.TamanhoPagina));
+            resumen,
+            new ResultadoPaginado<FinanceiroEntrada>(items, total, page, size, totalPaginas)
+        );
     }
 
     public async Task<FinanceiroDespesasResult> ListarDespesasAsync(FinanceiroFiltro filtro, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
-        var periodo = ResolverPeriodo(filtro);
+        var (inicioDate, fimDate) = ResolverPeriodo(filtro.Inicio, filtro.Fim, filtro.Ano, filtro.Mes);
 
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            SELECT id, grupo_despesa_id, numero_parcela, total_parcelas, categoria, descricao, valor, valor_total, vencimento, status, data_pagamento, observacao
-            FROM despesas
-            WHERE vencimento BETWEEN @inicio AND @fim
-            ORDER BY CASE WHEN vencimento = CURRENT_DATE() AND status <> 'PAGO' THEN 0 ELSE 1 END,
-                     vencimento ASC,
-                     grupo_despesa_id,
-                     numero_parcela;
-            """;
-        command.Parameters.AddWithValue("@inicio", periodo.Inicio.Date);
-        command.Parameters.AddWithValue("@fim", periodo.Fim.Date);
+        var despesas = await context.Despesas
+            .Where(d => d.Vencimento >= inicioDate && d.Vencimento <= fimDate)
+            .ToListAsync(cancellationToken);
 
-        var despesas = new List<FinanceiroDespesa>();
-        var categorias = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-        var hoje = DateOnly.FromDateTime(DateTime.Today);
-        var totalMes = 0m;
-        var naoPagas = 0m;
-        var pagas = 0m;
-        var vencimentoHojeValor = 0m;
-        var vencimentoHojeQtd = 0;
+        int totalDespesas = despesas.Count;
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        int vencimentoHoje = despesas.Count(d => d.Vencimento == today && d.Status != "PAGO");
+        decimal valorVencimentoHoje = despesas.Where(d => d.Vencimento == today && d.Status != "PAGO").Sum(d => d.Valor);
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            var vencimento = DateOnly.FromDateTime(reader.GetDateTime("vencimento"));
-            var valor = reader.GetDecimal("valor");
-            var status = reader.GetString("status");
-            var categoria = reader.GetString("categoria");
-            categorias.Add(NormalizarCategoriaExibicao(categoria));
-            totalMes += valor;
-            if (status == "PAGO") pagas += valor; else naoPagas += valor;
-            if (vencimento == hoje && status != "PAGO")
-            {
-                vencimentoHojeQtd++;
-                vencimentoHojeValor += valor;
-            }
+        decimal totalMes = despesas.Sum(d => d.Valor);
+        decimal totalNaoPagoMes = despesas.Where(d => d.Status != "PAGO").Sum(d => d.Valor);
+        decimal totalPagoMes = despesas.Where(d => d.Status == "PAGO").Sum(d => d.Valor);
 
-            despesas.Add(new FinanceiroDespesa(
-                reader.GetInt64("id"),
-                reader.GetString("grupo_despesa_id"),
-                reader.GetInt32("numero_parcela"),
-                reader.GetInt32("total_parcelas"),
-                NormalizarCategoriaExibicao(categoria),
-                reader.GetString("descricao"),
-                valor,
-                reader.GetDecimal("valor_total"),
-                vencimento,
-                status,
-                GetNullableDateOnly(reader, "data_pagamento"),
-                reader.NullableString("observacao")));
-        }
+        var resumen = new FinanceiroDespesasResumo(
+            totalDespesas,
+            vencimentoHoje,
+            valorVencimentoHoje,
+            totalMes,
+            totalNaoPagoMes,
+            totalPagoMes
+        );
 
-        return new FinanceiroDespesasResult(
-            new FinanceiroDespesasResumo(despesas.Count, vencimentoHojeQtd, vencimentoHojeValor, totalMes, naoPagas, pagas),
-            categorias,
-            despesas);
+        var categorias = await context.Despesas
+            .Select(d => d.Categoria)
+            .Distinct()
+            .OrderBy(c => c)
+            .ToListAsync(cancellationToken);
+
+        var orderedDespesas = despesas
+            .OrderBy(d => d.Vencimento == today && d.Status != "PAGO" ? 0 : 1)
+            .ThenBy(d => d.Vencimento)
+            .ThenBy(d => d.GrupoDespesaId)
+            .ThenBy(d => d.NumeroParcela)
+            .Select(d => new FinanceiroDespesa(
+                d.Id,
+                d.GrupoDespesaId ?? "",
+                d.NumeroParcela,
+                d.TotalParcelas,
+                d.Categoria,
+                d.Descricao,
+                d.Valor,
+                d.ValorTotal,
+                d.Vencimento,
+                d.Status,
+                d.DataPagamento,
+                d.Observacao
+            ))
+            .ToList();
+
+        return new FinanceiroDespesasResult(resumen, categorias, orderedDespesas);
     }
 
     public async Task<long> CriarDespesaAsync(FinanceiroDespesaRequest request, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
+        var isParcelado = request.CondicaoPagamento.Equals("PARCELADO", StringComparison.OrdinalIgnoreCase);
+        var parcelas = isParcelado ? Math.Max(request.QuantidadeParcelas, 1) : 1;
+        var valorParcela = isParcelado ? Math.Round(request.Valor / parcelas, 2) : request.Valor;
+        var valorAjustado = isParcelado ? request.Valor - (valorParcela * (parcelas - 1)) : request.Valor;
 
-        var transacaoCriada = false;
-        var transaction = unitOfWork.Transaction;
-        if (transaction == null)
+        var grupoId = Guid.NewGuid().ToString();
+        long firstId = 0;
+
+        for (int i = 1; i <= parcelas; i++)
         {
-            transaction = await unitOfWork.BeginTransactionAsync(cancellationToken);
-            transacaoCriada = true;
+            var valor = i == parcelas ? valorAjustado : valorParcela;
+            var vencimento = request.Vencimento.AddMonths(i - 1);
+            var status = request.JaPago && i == 1 ? "PAGO" : "PENDENTE";
+            var dataPagamento = status == "PAGO" ? (DateOnly?)DateOnly.FromDateTime(DateTime.Today) : null;
+
+            var despesa = new Despesa(
+                0,
+                request.UsuarioId,
+                grupoId,
+                i,
+                parcelas,
+                request.Categoria.Trim(),
+                request.Descricao.Trim(),
+                valor,
+                request.Valor,
+                vencimento,
+                status,
+                dataPagamento,
+                request.Observacao
+            );
+
+            context.Despesas.Add(despesa);
+            await context.SaveChangesAsync(cancellationToken);
+            if (i == 1)
+            {
+                firstId = despesa.Id;
+            }
         }
 
-        try
-        {
-            var totalParcelas = request.CondicaoPagamento == "PARCELADO" ? request.QuantidadeParcelas : 1;
-            var grupoId = Guid.NewGuid().ToString("N");
-            var valorParcela = Math.Round(request.Valor / totalParcelas, 2);
-            var restante = request.Valor;
-            long primeiroId = 0;
-
-            for (var parcela = 1; parcela <= totalParcelas; parcela++)
-            {
-                var valor = parcela == totalParcelas ? restante : valorParcela;
-                restante -= valor;
-                await using var command = (MySqlCommand)connection.CreateCommand();
-                command.Transaction = (MySqlTransaction)transaction;
-                command.CommandText = """
-                    INSERT INTO despesas
-                        (cadastrado_por_usuario_id, grupo_despesa_id, numero_parcela, total_parcelas, categoria, descricao, valor, valor_total, vencimento, status, data_pagamento, observacao)
-                    VALUES
-                        (@usuarioId, @grupoId, @numeroParcela, @totalParcelas, @categoria, @descricao, @valor, @valorTotal, @vencimento, @status, @dataPagamento, @observacao);
-                    SELECT LAST_INSERT_ID();
-                    """;
-                command.Parameters.AddWithValue("@usuarioId", request.UsuarioId);
-                command.Parameters.AddWithValue("@grupoId", grupoId);
-                command.Parameters.AddWithValue("@numeroParcela", parcela);
-                command.Parameters.AddWithValue("@totalParcelas", totalParcelas);
-                command.Parameters.AddWithValue("@categoria", NormalizarCategoriaExibicao(request.Categoria));
-                command.Parameters.AddWithValue("@descricao", request.Descricao.Trim());
-                command.Parameters.AddWithValue("@valor", valor);
-                command.Parameters.AddWithValue("@valorTotal", request.Valor);
-                command.Parameters.AddWithValue("@vencimento", request.Vencimento.AddMonths(parcela - 1).ToDateTime(TimeOnly.MinValue));
-                command.Parameters.AddWithValue("@status", request.JaPago ? "PAGO" : "ABERTO");
-                command.Parameters.AddWithValue("@dataPagamento", request.JaPago ? DateTime.Today : DBNull.Value);
-                command.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
-                var id = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
-                if (primeiroId == 0) primeiroId = id;
-            }
-
-            if (transacaoCriada)
-            {
-                await unitOfWork.CommitAsync(cancellationToken);
-            }
-
-            return primeiroId;
-        }
-        catch
-        {
-            if (transacaoCriada)
-            {
-                await unitOfWork.RollbackAsync(cancellationToken);
-            }
-            throw;
-        }
+        return firstId;
     }
 
     public async Task<bool> PagarDespesaAsync(long id, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = "UPDATE despesas SET status = 'PAGO', data_pagamento = CURRENT_DATE() WHERE id = @id;";
-        command.Parameters.AddWithValue("@id", id);
-        return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
-    }
-
-    public async Task<bool> AtualizarDespesaAsync(string grupoDespesaId, FinanceiroDespesaAtualizarRequest request, CancellationToken cancellationToken = default)
-    {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
-
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            SELECT id
-            FROM despesas
-            WHERE grupo_despesa_id = @grupoId
-            ORDER BY numero_parcela;
-            """;
-        command.Parameters.AddWithValue("@grupoId", grupoDespesaId);
-
-        var ids = new List<long>();
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
-        {
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                ids.Add(reader.GetInt64("id"));
-            }
-        }
-
-        if (ids.Count == 0)
+        var existing = await context.Despesas.FindAsync(new object[] { id }, cancellationToken);
+        if (existing == null)
         {
             return false;
         }
 
-        var transacaoCriada = false;
-        var transaction = unitOfWork.Transaction;
-        if (transaction == null)
+        var updated = existing with
         {
-            transaction = await unitOfWork.BeginTransactionAsync(cancellationToken);
-            transacaoCriada = true;
+            Status = "PAGO",
+            DataPagamento = DateOnly.FromDateTime(DateTime.Today)
+        };
+
+        context.Entry(existing).CurrentValues.SetValues(updated);
+        return await context.SaveChangesAsync(cancellationToken) > 0;
+    }
+
+    public async Task<bool> AtualizarDespesaAsync(string grupoDespesaId, FinanceiroDespesaAtualizarRequest request, CancellationToken cancellationToken = default)
+    {
+        var despesas = await context.Despesas
+            .Where(d => d.GrupoDespesaId == grupoDespesaId)
+            .OrderBy(d => d.NumeroParcela)
+            .ToListAsync(cancellationToken);
+
+        if (despesas.Count == 0)
+        {
+            return false;
         }
 
-        try
-        {
-            var valorParcela = Math.Round(request.Valor / ids.Count, 2);
-            var restante = request.Valor;
-            for (var index = 0; index < ids.Count; index++)
-            {
-                var valor = index == ids.Count - 1 ? restante : valorParcela;
-                restante -= valor;
-                await using var update = (MySqlCommand)connection.CreateCommand();
-                update.Transaction = (MySqlTransaction)transaction;
-                update.CommandText = """
-                    UPDATE despesas
-                    SET categoria = @categoria,
-                        descricao = @descricao,
-                        valor = @valor,
-                        valor_total = @valorTotal,
-                        vencimento = @vencimento,
-                        observacao = @observacao
-                    WHERE id = @id;
-                    """;
-                update.Parameters.AddWithValue("@id", ids[index]);
-                update.Parameters.AddWithValue("@categoria", NormalizarCategoriaExibicao(request.Categoria));
-                update.Parameters.AddWithValue("@descricao", request.Descricao.Trim());
-                update.Parameters.AddWithValue("@valor", valor);
-                update.Parameters.AddWithValue("@valorTotal", request.Valor);
-                update.Parameters.AddWithValue("@vencimento", request.Vencimento.AddMonths(index).ToDateTime(TimeOnly.MinValue));
-                update.Parameters.AddWithValue("@observacao", ToDb(request.Observacao));
-                await update.ExecuteNonQueryAsync(cancellationToken);
-            }
+        var totalParcelas = despesas.Count;
+        var valorParcela = Math.Round(request.Valor / totalParcelas, 2);
+        var valorAjustado = request.Valor - (valorParcela * (totalParcelas - 1));
 
-            if (transacaoCriada)
-            {
-                await unitOfWork.CommitAsync(cancellationToken);
-            }
-            return true;
-        }
-        catch
+        for (int i = 0; i < despesas.Count; i++)
         {
-            if (transacaoCriada)
+            var despesa = despesas[i];
+            var n = i + 1;
+            var valor = n == totalParcelas ? valorAjustado : valorParcela;
+            var vencimento = request.Vencimento.AddMonths(i);
+
+            var updated = despesa with
             {
-                await unitOfWork.RollbackAsync(cancellationToken);
-            }
-            throw;
+                Categoria = request.Categoria.Trim(),
+                Descricao = request.Descricao.Trim(),
+                Valor = valor,
+                ValorTotal = request.Valor,
+                Vencimento = vencimento,
+                Observacao = request.Observacao
+            };
+
+            context.Entry(despesa).CurrentValues.SetValues(updated);
         }
+
+        return await context.SaveChangesAsync(cancellationToken) > 0;
     }
 
     public async Task<FinanceiroGraficosResult> ObterGraficosAsync(int? ano, int? mes, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirEstruturaFinanceiro(connection, (MySqlTransaction?)unitOfWork.Transaction, cancellationToken);
-        var anoFiltro = ano ?? DateTime.Today.Year;
-        var mesFiltro = mes ?? DateTime.Today.Month;
+        var targetAno = ano ?? DateTime.Today.Year;
+        var targetMes = mes ?? DateTime.Today.Month;
 
-        var receitaAnual = await ListarMensal(connection, (MySqlTransaction?)unitOfWork.Transaction, "SELECT MONTH(data_pedido) mes, COALESCE(SUM(valor_pago),0) valor FROM pedidos WHERE YEAR(data_pedido)=@ano GROUP BY MONTH(data_pedido);", anoFiltro, cancellationToken);
-        var despesaAnual = await ListarMensal(connection, (MySqlTransaction?)unitOfWork.Transaction, "SELECT MONTH(vencimento) mes, COALESCE(SUM(valor),0) valor FROM despesas WHERE YEAR(vencimento)=@ano GROUP BY MONTH(vencimento);", anoFiltro, cancellationToken);
-        var despesasMes = await ListarPorCategoria(connection, (MySqlTransaction?)unitOfWork.Transaction, anoFiltro, mesFiltro, cancellationToken);
-        var clientesMes = await ListarTopClientes(connection, (MySqlTransaction?)unitOfWork.Transaction, anoFiltro, mesFiltro, cancellationToken);
-        var pedidosPorStatus = await ListarPedidosPorStatus(connection, (MySqlTransaction?)unitOfWork.Transaction, anoFiltro, mesFiltro, cancellationToken);
-        var usuariosRanking = await ListarUsuariosRanking(connection, (MySqlTransaction?)unitOfWork.Transaction, anoFiltro, mesFiltro, cancellationToken);
+        var startOfYear = new DateOnly(targetAno, 1, 1);
+        var endOfYear = new DateOnly(targetAno, 12, 31);
+        var startOfMonth = new DateOnly(targetAno, targetMes, 1);
+        var endOfMonth = startOfMonth.AddMonths(1).AddDays(-1);
 
-        return new FinanceiroGraficosResult(anoFiltro, mesFiltro, receitaAnual, despesaAnual, despesasMes, clientesMes, pedidosPorStatus, usuariosRanking);
+        var receitasRaw = await context.Pedidos
+            .Where(p => p.DataPedido >= startOfYear && p.DataPedido <= endOfYear)
+            .Select(p => new { p.DataPedido, p.ValorPago })
+            .ToListAsync(cancellationToken);
+
+        var receitasGrouped = receitasRaw
+            .GroupBy(p => p.DataPedido.Month)
+            .Select(g => new { Mes = g.Key, Valor = g.Sum(p => p.ValorPago) })
+            .ToList();
+
+        var receitaAnual = Enumerable.Range(1, 12)
+            .Select(m => new FinanceiroGraficoMensal(m, receitasGrouped.FirstOrDefault(r => r.Mes == m)?.Valor ?? 0m))
+            .ToList();
+
+        var despesasRaw = await context.Despesas
+            .Where(d => d.Vencimento >= startOfYear && d.Vencimento <= endOfYear)
+            .Select(d => new { d.Vencimento, d.Valor })
+            .ToListAsync(cancellationToken);
+
+        var despesasGrouped = despesasRaw
+            .GroupBy(d => d.Vencimento.Month)
+            .Select(g => new { Mes = g.Key, Valor = g.Sum(d => d.Valor) })
+            .ToList();
+
+        var despesaAnual = Enumerable.Range(1, 12)
+            .Select(m => new FinanceiroGraficoMensal(m, despesasGrouped.FirstOrDefault(d => d.Mes == m)?.Valor ?? 0m))
+            .ToList();
+
+        var despesasMesRaw = await context.Despesas
+            .Where(d => d.Vencimento >= startOfMonth && d.Vencimento <= endOfMonth)
+            .GroupBy(d => d.Categoria)
+            .Select(g => new { Categoria = g.Key, Valor = g.Sum(d => d.Valor) })
+            .OrderByDescending(x => x.Valor)
+            .ToListAsync(cancellationToken);
+
+        var despesasMes = despesasMesRaw
+            .Select(x => new FinanceiroDespesaCategoria(x.Categoria, x.Valor))
+            .ToList();
+
+        var clientesMesList = await (from p in context.Pedidos
+                                     join c in context.Clientes on p.ClienteId equals c.Id
+                                     where p.Tipo == "PEDIDO" && p.DataPedido >= startOfMonth && p.DataPedido <= endOfMonth
+                                     group p by c.Nome into g
+                                     select new { Cliente = g.Key, Valor = g.Sum(p => p.Total) })
+                                    .OrderByDescending(x => x.Valor)
+                                    .Take(10)
+                                    .ToListAsync(cancellationToken);
+
+        var clientesMesRaw = clientesMesList
+            .Select(x => new FinanceiroClienteValor(x.Cliente, x.Valor))
+            .ToList();
+
+        var pedidosPorStatusRaw = await context.Pedidos
+            .Where(p => p.Tipo == "PEDIDO" && p.DataPedido >= startOfMonth && p.DataPedido <= endOfMonth)
+            .GroupBy(p => p.Status)
+            .Select(g => new { Status = g.Key, Quantidade = g.Count() })
+            .ToListAsync(cancellationToken);
+
+        var pedidosPorStatus = pedidosPorStatusRaw
+            .Select(x => new FinanceiroPedidoStatus(x.Status, x.Quantidade))
+            .ToList();
+
+        var usuariosRankingList = await (from p in context.Pedidos
+                                         join u in context.Usuarios on p.CriadoPorUsuarioId equals u.Id
+                                         where p.Tipo == "PEDIDO" && p.DataPedido >= startOfMonth && p.DataPedido <= endOfMonth
+                                         group p by u.Nome into g
+                                         select new { Usuario = g.Key, Quantidade = g.Count() })
+                                        .OrderByDescending(x => x.Quantidade)
+                                        .Take(10)
+                                        .ToListAsync(cancellationToken);
+
+        var usuariosRanking = usuariosRankingList
+            .Select(x => new FinanceiroUsuarioRanking(x.Usuario, x.Quantidade))
+            .ToList();
+
+        return new FinanceiroGraficosResult(
+            targetAno,
+            targetMes,
+            receitaAnual,
+            despesaAnual,
+            despesasMes,
+            clientesMesRaw,
+            pedidosPorStatus,
+            usuariosRanking
+        );
     }
 
-    private static async Task<IReadOnlyList<FinanceiroGraficoMensal>> ListarMensal(DbConnection connection, MySqlTransaction? transaction, string sql, int ano, CancellationToken cancellationToken)
+    private static (DateOnly Inicio, DateOnly Fim) ResolverPeriodo(DateOnly? inicio, DateOnly? fim, int? ano, int? mes)
     {
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = sql;
-        command.Parameters.AddWithValue("@ano", ano);
-        var valores = Enumerable.Range(1, 12).ToDictionary(mes => mes, _ => 0m);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken)) valores[reader.GetInt32("mes")] = reader.GetDecimal("valor");
-        return valores.Select(item => new FinanceiroGraficoMensal(item.Key, item.Value)).ToList();
-    }
-
-    private static async Task<IReadOnlyList<FinanceiroDespesaCategoria>> ListarPorCategoria(DbConnection connection, MySqlTransaction? transaction, int ano, int mes, CancellationToken cancellationToken)
-    {
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT categoria, COALESCE(SUM(valor),0) valor FROM despesas WHERE YEAR(vencimento)=@ano AND MONTH(vencimento)=@mes GROUP BY categoria ORDER BY valor DESC;";
-        command.Parameters.AddWithValue("@ano", ano);
-        command.Parameters.AddWithValue("@mes", mes);
-        var itens = new List<FinanceiroDespesaCategoria>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken)) itens.Add(new FinanceiroDespesaCategoria(reader.GetString("categoria"), reader.GetDecimal("valor")));
-        return itens;
-    }
-
-    private static async Task<IReadOnlyList<FinanceiroClienteValor>> ListarTopClientes(DbConnection connection, MySqlTransaction? transaction, int ano, int mes, CancellationToken cancellationToken)
-    {
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT c.nome cliente, COALESCE(SUM(p.total),0) valor
-            FROM pedidos p
-            INNER JOIN clientes c ON c.id = p.cliente_id
-            WHERE p.tipo = 'PEDIDO' AND YEAR(p.data_pedido)=@ano AND MONTH(p.data_pedido)=@mes
-            GROUP BY c.nome
-            ORDER BY valor DESC
-            LIMIT 10;
-            """;
-        command.Parameters.AddWithValue("@ano", ano);
-        command.Parameters.AddWithValue("@mes", mes);
-        var itens = new List<FinanceiroClienteValor>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken)) itens.Add(new FinanceiroClienteValor(reader.GetString("cliente"), reader.GetDecimal("valor")));
-        return itens;
-    }
-
-    private static async Task<IReadOnlyList<FinanceiroPedidoStatus>> ListarPedidosPorStatus(DbConnection connection, MySqlTransaction? transaction, int ano, int mes, CancellationToken cancellationToken)
-    {
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT status, COUNT(*) quantidade
-            FROM pedidos
-            WHERE tipo = 'PEDIDO' AND YEAR(data_pedido)=@ano AND MONTH(data_pedido)=@mes
-            GROUP BY status;
-            """;
-        command.Parameters.AddWithValue("@ano", ano);
-        command.Parameters.AddWithValue("@mes", mes);
-        var itens = new List<FinanceiroPedidoStatus>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken)) itens.Add(new FinanceiroPedidoStatus(reader.GetString("status"), reader.GetInt32("quantidade")));
-        return itens;
-    }
-
-    private static async Task<IReadOnlyList<FinanceiroUsuarioRanking>> ListarUsuariosRanking(DbConnection connection, MySqlTransaction? transaction, int ano, int mes, CancellationToken cancellationToken)
-    {
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT u.nome usuario, COUNT(p.id) quantidade_pedidos
-            FROM pedidos p
-            INNER JOIN usuarios u ON u.id = p.criado_por_usuario_id
-            WHERE p.tipo = 'PEDIDO' AND YEAR(p.data_pedido)=@ano AND MONTH(p.data_pedido)=@mes
-            GROUP BY u.nome
-            ORDER BY quantidade_pedidos DESC
-            LIMIT 10;
-            """;
-        command.Parameters.AddWithValue("@ano", ano);
-        command.Parameters.AddWithValue("@mes", mes);
-        var itens = new List<FinanceiroUsuarioRanking>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken)) itens.Add(new FinanceiroUsuarioRanking(reader.GetString("usuario"), reader.GetInt32("quantidade_pedidos")));
-        return itens;
-    }
-
-    private static ResultadoPaginado<T> Paginar<T>(IReadOnlyList<T> itens, int pagina, int tamanhoPagina)
-    {
-        var pageSize = Math.Clamp(tamanhoPagina, 1, 100);
-        var total = itens.Count;
-        var totalPaginas = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
-        var page = Math.Clamp(pagina, 1, totalPaginas);
-        var pageItems = itens.Skip((page - 1) * pageSize).Take(pageSize).ToList();
-        return new ResultadoPaginado<T>(pageItems, total, page, pageSize, totalPaginas);
-    }
-
-    private static (DateTime Inicio, DateTime Fim) ResolverPeriodo(FinanceiroFiltro filtro)
-    {
-        if (filtro.Inicio is not null || filtro.Fim is not null)
+        if (inicio.HasValue && fim.HasValue)
         {
-            var start = filtro.Inicio?.ToDateTime(TimeOnly.MinValue) ?? DateTime.MinValue;
-            var end = filtro.Fim?.ToDateTime(TimeOnly.MaxValue) ?? DateTime.MaxValue;
-            return (start, end);
+            return (inicio.Value, fim.Value);
         }
 
-        var year = filtro.Ano ?? DateTime.Today.Year;
-        var month = filtro.Mes ?? DateTime.Today.Month;
-        var first = new DateTime(year, month, 1);
-        var last = first.AddMonths(1).AddTicks(-1);
-        return (first, last);
+        var y = ano ?? DateTime.Today.Year;
+        var m = mes ?? DateTime.Today.Month;
+        var firstDay = new DateOnly(y, m, 1);
+        var lastDay = firstDay.AddMonths(1).AddDays(-1);
+        return (firstDay, lastDay);
     }
-
-    private static void PreencherFiltros(MySqlCommand command, (DateTime Inicio, DateTime Fim) periodo, string? status)
-    {
-        command.Parameters.AddWithValue("@inicio", periodo.Inicio);
-        command.Parameters.AddWithValue("@fim", periodo.Fim);
-        command.Parameters.AddWithValue("@status", string.IsNullOrWhiteSpace(status) ? DBNull.Value : status.Trim().ToUpperInvariant());
-    }
-
-    private static async Task GarantirEstruturaFinanceiro(DbConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
-    {
-        await GarantirColuna(connection, transaction, "pedidos", "valor_estornado", "ALTER TABLE pedidos ADD COLUMN valor_estornado DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER motivo_cancelamento;", cancellationToken);
-        await GarantirColuna(connection, transaction, "pagamentos", "registrado_em", "ALTER TABLE pagamentos ADD COLUMN registrado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;", cancellationToken);
-        await GarantirColuna(connection, transaction, "despesas", "grupo_despesa_id", "ALTER TABLE despesas ADD COLUMN grupo_despesa_id VARCHAR(40) NULL AFTER id;", cancellationToken);
-        await GarantirColuna(connection, transaction, "despesas", "numero_parcela", "ALTER TABLE despesas ADD COLUMN numero_parcela INT NOT NULL DEFAULT 1 AFTER grupo_despesa_id;", cancellationToken);
-        await GarantirColuna(connection, transaction, "despesas", "total_parcelas", "ALTER TABLE despesas ADD COLUMN total_parcelas INT NOT NULL DEFAULT 1 AFTER numero_parcela;", cancellationToken);
-        await GarantirColuna(connection, transaction, "despesas", "valor_total", "ALTER TABLE despesas ADD COLUMN valor_total DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER valor;", cancellationToken);
-        await AjustarColunaCategoriaDespesa(connection, transaction, cancellationToken);
-
-        await using var update = (MySqlCommand)connection.CreateCommand();
-        update.Transaction = transaction;
-        update.CommandText = "UPDATE despesas SET grupo_despesa_id = COALESCE(grupo_despesa_id, CONCAT('LEGADO-', id)), valor_total = CASE WHEN valor_total = 0 THEN valor ELSE valor_total END;";
-        await update.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    private static async Task AjustarColunaCategoriaDespesa(DbConnection connection, MySqlTransaction? transaction, CancellationToken cancellationToken)
-    {
-        await using var consulta = (MySqlCommand)connection.CreateCommand();
-        consulta.Transaction = transaction;
-        consulta.CommandText = """
-            SELECT DATA_TYPE
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME = 'despesas'
-              AND COLUMN_NAME = 'categoria'
-            LIMIT 1;
-            """;
-        var tipoAtual = Convert.ToString(await consulta.ExecuteScalarAsync(cancellationToken));
-        if (string.Equals(tipoAtual, "varchar", StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "ALTER TABLE despesas MODIFY COLUMN categoria VARCHAR(120) NOT NULL;";
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    private static async Task GarantirColuna(DbConnection connection, MySqlTransaction? transaction, string tabela, string coluna, string alterSql, CancellationToken cancellationToken)
-    {
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT COUNT(*)
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME = @tabela
-              AND COLUMN_NAME = @coluna;
-            """;
-        command.Parameters.AddWithValue("@tabela", tabela);
-        command.Parameters.AddWithValue("@coluna", coluna);
-        var existe = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)) > 0;
-        if (existe) return;
-
-        await using var alter = (MySqlCommand)connection.CreateCommand();
-        alter.Transaction = transaction;
-        alter.CommandText = alterSql;
-        try
-        {
-            await alter.ExecuteNonQueryAsync(cancellationToken);
-        }
-        catch (MySqlException exception) when (exception.Number == 1060)
-        {
-            // Outra requisicao pode ter criado a coluna entre a consulta e o ALTER TABLE.
-        }
-    }
-
-    private static DateOnly? GetNullableDateOnly(MySqlDataReader reader, string column)
-    {
-        var ordinal = reader.GetOrdinal(column);
-        return reader.IsDBNull(ordinal) ? null : DateOnly.FromDateTime(reader.GetDateTime(ordinal));
-    }
-
-    private static string NormalizarCategoriaExibicao(string value)
-    {
-        var normalized = value.Trim();
-        if (normalized.Length == 0) return normalized;
-        return string.Join(" ", normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(word =>
-            word.Length <= 2 ? word.ToUpperInvariant() : char.ToUpperInvariant(word[0]) + word[1..].ToLowerInvariant()));
-    }
-
-    private static object ToDb(string? value) => string.IsNullOrWhiteSpace(value) ? DBNull.Value : value.Trim();
 }

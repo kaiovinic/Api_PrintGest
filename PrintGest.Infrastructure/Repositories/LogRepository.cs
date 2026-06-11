@@ -1,30 +1,12 @@
-using MySqlConnector;
+using Microsoft.EntityFrameworkCore;
 using PrintGest.Application.Abstractions;
 using PrintGest.Domain.Entities;
 using PrintGest.Infrastructure.Data;
 
 namespace PrintGest.Infrastructure.Repositories;
 
-public sealed class LogRepository(IUnitOfWork unitOfWork) : ILogRepository
+public sealed class LogRepository(PrintGestDbContext context) : ILogRepository
 {
-    private static async Task GarantirTabelaAsync(MySqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            CREATE TABLE IF NOT EXISTS logs_sistema (
-                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                usuario_id BIGINT UNSIGNED NOT NULL,
-                entidade VARCHAR(60) NOT NULL,
-                entidade_id BIGINT UNSIGNED NOT NULL,
-                acao VARCHAR(60) NOT NULL,
-                descricao VARCHAR(500) NULL,
-                criado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                CONSTRAINT fk_log_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
-            );
-            """;
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
-
     public async Task<ResultadoPaginado<LogSistema>> ListAsync(
         string? entidade,
         long? entidadeId,
@@ -34,96 +16,56 @@ public sealed class LogRepository(IUnitOfWork unitOfWork) : ILogRepository
         int tamanhoPagina,
         CancellationToken cancellationToken = default)
     {
-        var logs = new List<LogSistema>();
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirTabelaAsync((MySqlConnection)connection, cancellationToken);
-
         var paginaAtual = Math.Max(pagina, 1);
         var tamanho = Math.Clamp(tamanhoPagina, 5, 100);
         var offset = (paginaAtual - 1) * tamanho;
 
-        // 1. Contar Total
-        await using var totalCommand = (MySqlCommand)connection.CreateCommand();
-        totalCommand.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        totalCommand.CommandText = """
-            SELECT COUNT(*)
-            FROM logs_sistema l
-            WHERE (@entidade IS NULL OR l.entidade = @entidade)
-              AND (@entidadeId IS NULL OR l.entidade_id = @entidadeId)
-              AND (@dataInicio IS NULL OR DATE(l.criado_em) >= @dataInicio)
-              AND (@dataFinal IS NULL OR DATE(l.criado_em) <= @dataFinal);
-            """;
-        totalCommand.Parameters.AddWithValue("@entidade", (object?)entidade ?? DBNull.Value);
-        totalCommand.Parameters.AddWithValue("@entidadeId", (object?)entidadeId ?? DBNull.Value);
-        totalCommand.Parameters.AddWithValue("@dataInicio", dataInicio?.ToString("yyyy-MM-dd") ?? (object)DBNull.Value);
-        totalCommand.Parameters.AddWithValue("@dataFinal", dataFinal?.ToString("yyyy-MM-dd") ?? (object)DBNull.Value);
-        var total = Convert.ToInt32(await totalCommand.ExecuteScalarAsync(cancellationToken));
+        var query = from log in context.LogsSistema
+                    join user in context.Usuarios on log.UsuarioId equals user.Id into userGroup
+                    from user in userGroup.DefaultIfEmpty()
+                    select new { log, UsuarioNome = user != null ? user.Nome : null };
+
+        if (!string.IsNullOrWhiteSpace(entidade))
+        {
+            query = query.Where(q => q.log.Entidade == entidade);
+        }
+
+        if (entidadeId.HasValue)
+        {
+            query = query.Where(q => q.log.EntidadeId == entidadeId.Value);
+        }
+
+        if (dataInicio.HasValue)
+        {
+            var dtInicio = dataInicio.Value.ToDateTime(TimeOnly.MinValue);
+            query = query.Where(q => q.log.CriadoEm >= dtInicio);
+        }
+
+        if (dataFinal.HasValue)
+        {
+            var dtFinal = dataFinal.Value.ToDateTime(TimeOnly.MaxValue);
+            query = query.Where(q => q.log.CriadoEm <= dtFinal);
+        }
+
+        var total = await query.CountAsync(cancellationToken);
         var totalPaginas = total == 0 ? 1 : (int)Math.Ceiling(total / (double)tamanho);
 
-        // 2. Buscar Itens
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            SELECT l.id,
-                   l.usuario_id,
-                   u.nome AS usuario,
-                   l.entidade,
-                   l.entidade_id,
-                   l.acao,
-                   l.descricao,
-                   l.criado_em
-            FROM logs_sistema l
-            LEFT JOIN usuarios u ON u.id = l.usuario_id
-            WHERE (@entidade IS NULL OR l.entidade = @entidade)
-              AND (@entidadeId IS NULL OR l.entidade_id = @entidadeId)
-              AND (@dataInicio IS NULL OR DATE(l.criado_em) >= @dataInicio)
-              AND (@dataFinal IS NULL OR DATE(l.criado_em) <= @dataFinal)
-            ORDER BY l.criado_em DESC
-            LIMIT @limit OFFSET @offset;
-            """;
-        command.Parameters.AddWithValue("@entidade", (object?)entidade ?? DBNull.Value);
-        command.Parameters.AddWithValue("@entidadeId", (object?)entidadeId ?? DBNull.Value);
-        command.Parameters.AddWithValue("@dataInicio", dataInicio?.ToString("yyyy-MM-dd") ?? (object)DBNull.Value);
-        command.Parameters.AddWithValue("@dataFinal", dataFinal?.ToString("yyyy-MM-dd") ?? (object)DBNull.Value);
-        command.Parameters.AddWithValue("@limit", tamanho);
-        command.Parameters.AddWithValue("@offset", offset);
+        var items = await query.OrderByDescending(q => q.log.CriadoEm)
+                              .Skip(offset)
+                              .Take(tamanho)
+                              .ToListAsync(cancellationToken);
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            logs.Add(new LogSistema(
-                reader.GetInt64("id"),
-                reader.GetInt64("usuario_id"),
-                reader.NullableString("usuario"),
-                reader.GetString("entidade"),
-                reader.GetInt64("entidade_id"),
-                reader.GetString("acao"),
-                reader.NullableString("descricao"),
-                reader.GetDateTime("criado_em")
-            ));
-        }
+        var logs = items.Select(i => i.log with { Usuario = i.UsuarioNome }).ToList();
 
         return new ResultadoPaginado<LogSistema>(logs, total, paginaAtual, tamanho, totalPaginas);
     }
 
     public async Task<long> CreateAsync(LogSistema log, CancellationToken cancellationToken = default)
     {
-        var connection = await unitOfWork.GetConnectionAsync(cancellationToken);
-        await GarantirTabelaAsync((MySqlConnection)connection, cancellationToken);
-
-        await using var command = (MySqlCommand)connection.CreateCommand();
-        command.Transaction = (MySqlTransaction?)unitOfWork.Transaction;
-        command.CommandText = """
-            INSERT INTO logs_sistema (usuario_id, entidade, entidade_id, acao, descricao)
-            VALUES (@usuarioId, @entidade, @entidadeId, @acao, @descricao);
-            SELECT LAST_INSERT_ID();
-            """;
-        command.Parameters.AddWithValue("@usuarioId", log.UsuarioId);
-        command.Parameters.AddWithValue("@entidade", log.Entidade);
-        command.Parameters.AddWithValue("@entidadeId", log.EntidadeId);
-        command.Parameters.AddWithValue("@acao", log.Acao);
-        command.Parameters.AddWithValue("@descricao", (object?)log.Descricao ?? DBNull.Value);
-
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+        // Enforce setting correct timestamp if not set or just insert as-is
+        var logToInsert = log.CriadoEm == default ? log with { CriadoEm = DateTime.UtcNow } : log;
+        context.LogsSistema.Add(logToInsert);
+        await context.SaveChangesAsync(cancellationToken);
+        return logToInsert.Id;
     }
 }
