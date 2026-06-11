@@ -86,12 +86,55 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
+if (Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") != "true")
+{
+    app.UseHttpsRedirection();
+}
 app.UseCors("PrintGestWeb");
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+
+using (var scope = app.Services.CreateScope())
+{
+    var context = scope.ServiceProvider.GetRequiredService<PrintGest.Infrastructure.Data.PrintGestDbContext>();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+    int retries = 6;
+    while (retries > 0)
+    {
+        try
+        {
+            context.Database.EnsureCreated();
+            if (!context.Usuarios.Any())
+            {
+                context.Usuarios.Add(new PrintGest.Domain.Entities.Usuario(
+                    0,
+                    "Administrador",
+                    "admin@print.com",
+                    null,
+                    "123456789",
+                    PrintGest.Domain.Enums.PerfilUsuario.Admin,
+                    PrintGest.Domain.Enums.StatusUsuario.Ativo,
+                    true));
+                context.SaveChanges();
+                logger.LogInformation("Banco de dados criado e usuário administrador padrão inserido.");
+            }
+            else
+            {
+                logger.LogInformation("Conexão com o banco de dados estabelecida com sucesso.");
+            }
+            break;
+        }
+        catch (Exception ex)
+        {
+            retries--;
+            logger.LogWarning(ex, "Falha ao conectar ou criar o banco de dados. Tentando novamente em 5 segundos... ({Retries} tentativas restantes)", retries);
+            if (retries == 0) throw;
+            Thread.Sleep(5000);
+        }
+    }
+}
 
 app.Run();
 
