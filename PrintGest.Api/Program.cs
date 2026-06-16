@@ -139,10 +139,6 @@ using (var scope = app.Services.CreateScope())
                 context.SaveChanges();
                 logger.LogInformation("Banco de dados criado e usuário administrador padrão inserido.");
             }
-            else
-            {
-                logger.LogInformation("Conexão com o banco de dados estabelecida com sucesso.");
-            }
             break;
         }
         catch (Exception ex)
