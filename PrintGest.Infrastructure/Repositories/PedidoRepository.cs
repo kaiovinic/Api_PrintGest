@@ -92,7 +92,7 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
         var query = from p in context.Pedidos
                     join c in context.Clientes on p.ClienteId equals c.Id
                     join u in context.Usuarios on p.CriadoPorUsuarioId equals u.Id
-                    where (p.Status == "ABERTO" || p.Status == "ORCADO") && p.DataEntrega != null
+                    where p.Status == "ABERTO" && p.DataEntrega != null
                     select new { p, ClienteNome = c.Nome, CriadoPorNome = u.Nome };
 
         if (!string.IsNullOrWhiteSpace(atendente))
