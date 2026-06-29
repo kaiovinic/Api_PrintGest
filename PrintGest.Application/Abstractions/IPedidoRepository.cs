@@ -6,6 +6,7 @@ public interface IPedidoRepository
 {
     Task<ResultadoPaginado<PedidoResumo>> ListAsync(PedidoFiltro filtro, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<PedidoResumo>> ListRecentAsync(CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<PedidoResumo>> ListPendingDeliveriesAsync(string? atendente, CancellationToken cancellationToken = default);
     Task<PedidoDetalhe?> GetDetailsByIdAsync(long id, CancellationToken cancellationToken = default);
     Task<long> CriarPedidoAsync(PedidoCadastroDto request, string tipo, string status, CancellationToken cancellationToken = default);
     Task<bool> EditarOrcamentoAsync(long id, PedidoCadastroDto request, CancellationToken cancellationToken = default);
@@ -19,7 +20,7 @@ public interface IPedidoRepository
     Task<(string Tipo, string Status, decimal ValorPago, decimal SaldoDevedor)?> ObterEstadoPedidoAsync(long id, CancellationToken cancellationToken = default);
 }
 
-public sealed record PedidoFiltro(int? Ano, int? Mes, DateOnly? Inicio, DateOnly? Fim, string? Status, int Pagina = 1, int TamanhoPagina = 10);
+public sealed record PedidoFiltro(int? Ano, int? Mes, DateOnly? Inicio, DateOnly? Fim, string? Status, string? Atendente = null, int Pagina = 1, int TamanhoPagina = 10);
 
 public sealed record ResultadoPaginado<T>(
     IReadOnlyList<T> Itens,

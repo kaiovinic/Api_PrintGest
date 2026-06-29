@@ -17,16 +17,23 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
         [FromQuery] DateOnly? inicio,
         [FromQuery] DateOnly? fim,
         [FromQuery] string? status,
+        [FromQuery] string? atendente,
         [FromQuery] int pagina = 1,
         [FromQuery] int tamanhoPagina = 10,
         CancellationToken cancellationToken = default)
     {
-        return Ok(await pedidos.ListAsync(new PedidoFiltro(ano, mes, inicio, fim, status, pagina, tamanhoPagina), cancellationToken));
+        return Ok(await pedidos.ListAsync(new PedidoFiltro(ano, mes, inicio, fim, status, atendente, pagina, tamanhoPagina), cancellationToken));
     }
     [HttpGet("recentes")]
     public async Task<IActionResult> ListarRecentes(CancellationToken cancellationToken)
     {
         return Ok(await pedidos.ListRecentAsync(cancellationToken));
+    }
+
+    [HttpGet("pendentes-entrega")]
+    public async Task<IActionResult> ListarPendentesEntrega([FromQuery] string? atendente, CancellationToken cancellationToken)
+    {
+        return Ok(await pedidos.ListPendingDeliveriesAsync(atendente, cancellationToken));
     }
 
     [HttpGet("{id:long}")]

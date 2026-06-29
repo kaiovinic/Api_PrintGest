@@ -25,6 +25,11 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
             query = query.Where(q => q.p.Status == filtro.Status);
         }
 
+        if (!string.IsNullOrWhiteSpace(filtro.Atendente))
+        {
+            query = query.Where(q => q.CriadoPorNome == filtro.Atendente);
+        }
+
         var total = await query.CountAsync(cancellationToken);
         var totalPaginas = total == 0 ? 1 : (int)Math.Ceiling(total / (double)size);
 
@@ -64,6 +69,41 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
                     select new { p, ClienteNome = c.Nome, CriadoPorNome = u.Nome };
 
         var items = await query.Take(20).ToListAsync(cancellationToken);
+
+        return items.Select(x => new PedidoResumo(
+            x.p.Id,
+            x.p.Numero,
+            x.ClienteNome,
+            Mapping.TipoPedido(x.p.Tipo),
+            Mapping.StatusPedido(x.p.Status),
+            x.p.DataPedido,
+            x.p.DataEntrega,
+            x.p.Total,
+            x.p.ValorPago,
+            x.p.ValorEstornado,
+            x.p.SaldoDevedor,
+            x.CriadoPorNome,
+            x.p.MotivoCancelamento
+        )).ToList();
+    }
+
+    public async Task<IReadOnlyList<PedidoResumo>> ListPendingDeliveriesAsync(string? atendente, CancellationToken cancellationToken = default)
+    {
+        var query = from p in context.Pedidos
+                    join c in context.Clientes on p.ClienteId equals c.Id
+                    join u in context.Usuarios on p.CriadoPorUsuarioId equals u.Id
+                    where (p.Status == "ABERTO" || p.Status == "ORCADO") && p.DataEntrega != null
+                    select new { p, ClienteNome = c.Nome, CriadoPorNome = u.Nome };
+
+        if (!string.IsNullOrWhiteSpace(atendente))
+        {
+            query = query.Where(q => q.CriadoPorNome == atendente);
+        }
+
+        var items = await query
+            .OrderBy(q => q.p.DataEntrega)
+            .ThenBy(q => q.p.Id)
+            .ToListAsync(cancellationToken);
 
         return items.Select(x => new PedidoResumo(
             x.p.Id,
