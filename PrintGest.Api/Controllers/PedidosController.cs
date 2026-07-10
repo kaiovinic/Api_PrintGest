@@ -18,11 +18,12 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
         [FromQuery] DateOnly? fim,
         [FromQuery] string? status,
         [FromQuery] string? atendente,
+        [FromQuery] string? cliente,
         [FromQuery] int pagina = 1,
         [FromQuery] int tamanhoPagina = 10,
         CancellationToken cancellationToken = default)
     {
-        return Ok(await pedidos.ListAsync(new PedidoFiltro(ano, mes, inicio, fim, status, atendente, pagina, tamanhoPagina), cancellationToken));
+        return Ok(await pedidos.ListAsync(new PedidoFiltro(ano, mes, inicio, fim, status, atendente, pagina, tamanhoPagina, cliente), cancellationToken));
     }
     [HttpGet("recentes")]
     public async Task<IActionResult> ListarRecentes(CancellationToken cancellationToken)

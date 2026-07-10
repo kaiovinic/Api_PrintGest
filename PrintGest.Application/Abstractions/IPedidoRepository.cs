@@ -20,7 +20,7 @@ public interface IPedidoRepository
     Task<(string Tipo, string Status, decimal ValorPago, decimal SaldoDevedor, DateOnly? DataEntrega)?> ObterEstadoPedidoAsync(long id, CancellationToken cancellationToken = default);
 }
 
-public sealed record PedidoFiltro(int? Ano, int? Mes, DateOnly? Inicio, DateOnly? Fim, string? Status, string? Atendente = null, int Pagina = 1, int TamanhoPagina = 10);
+public sealed record PedidoFiltro(int? Ano, int? Mes, DateOnly? Inicio, DateOnly? Fim, string? Status, string? Atendente = null, int Pagina = 1, int TamanhoPagina = 10, string? Cliente = null);
 
 public sealed record ResultadoPaginado<T>(
     IReadOnlyList<T> Itens,

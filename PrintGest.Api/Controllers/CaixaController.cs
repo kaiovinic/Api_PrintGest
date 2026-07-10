@@ -57,17 +57,17 @@ public sealed class CaixaController(ICaixaRepository caixa, ILogRepository logRe
         var supervisor = await usuarioRepository.GetByEmailAsync(request.SupervisorEmail.Trim(), cancellationToken);
         if (supervisor is null || supervisor.Status == StatusUsuario.Bloqueado)
         {
-            return Unauthorized(new { mensagem = "Supervisor não encontrado ou bloqueado." });
+            return BadRequest(new { mensagem = "Supervisor não encontrado ou bloqueado." });
         }
 
         if (supervisor.Perfil is not (PerfilUsuario.Admin or PerfilUsuario.Gerente))
         {
-            return Unauthorized(new { mensagem = "Somente administradores ou gerentes podem autorizar cancelamentos." });
+            return BadRequest(new { mensagem = "Somente administradores ou gerentes podem autorizar cancelamentos." });
         }
 
         if (!AuthService.SenhaValida(request.SupervisorSenha, supervisor.SenhaHash))
         {
-            return Unauthorized(new { mensagem = "Senha do supervisor incorreta." });
+            return BadRequest(new { mensagem = "Senha do supervisor incorreta." });
         }
 
         try

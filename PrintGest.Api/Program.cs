@@ -5,6 +5,7 @@ using PrintGest.Application;
 using PrintGest.Application.Settings;
 using PrintGest.Infrastructure;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -13,6 +14,7 @@ builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
         options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+        options.JsonSerializerOptions.Converters.Add(new UtcDateTimeJsonConverter());
         options.JsonSerializerOptions.Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
     });
 builder.Services.AddEndpointsApiExplorer();
@@ -154,3 +156,20 @@ using (var scope = app.Services.CreateScope())
 app.Run();
 
 public partial class Program;
+
+public sealed class UtcDateTimeJsonConverter : JsonConverter<DateTime>
+{
+    public override DateTime Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        return DateTime.Parse(reader.GetString()!);
+    }
+
+    public override void Write(Utf8JsonWriter writer, DateTime value, JsonSerializerOptions options)
+    {
+        var utcValue = value.Kind == DateTimeKind.Unspecified 
+            ? DateTime.SpecifyKind(value, DateTimeKind.Utc) 
+            : value.ToUniversalTime();
+            
+        writer.WriteStringValue(utcValue.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
+    }
+}

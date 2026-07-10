@@ -30,6 +30,12 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
             query = query.Where(q => q.CriadoPorNome == filtro.Atendente);
         }
 
+        if (!string.IsNullOrWhiteSpace(filtro.Cliente))
+        {
+            var cleanCliente = filtro.Cliente.Trim();
+            query = query.Where(q => q.ClienteNome.Contains(cleanCliente));
+        }
+
         var total = await query.CountAsync(cancellationToken);
         var totalPaginas = total == 0 ? 1 : (int)Math.Ceiling(total / (double)size);
 
