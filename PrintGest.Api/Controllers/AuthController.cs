@@ -75,6 +75,36 @@ public sealed class AuthController(IAuthService authService, IUsuarioRepository 
         return sucesso ? NoContent() : BadRequest(new { mensagem = "Não foi possível atualizar a senha." });
     }
 
+    [Authorize]
+    [HttpPost("autorizar-supervisor")]
+    public async Task<IActionResult> AutorizarSupervisor(
+        [FromBody] LoginRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Senha))
+        {
+            return BadRequest(new { mensagem = "Informe o e-mail e a senha do supervisor." });
+        }
+
+        var usuario = await usuarioRepository.GetByEmailAsync(request.Email.Trim(), cancellationToken);
+        if (usuario is null || usuario.Status == StatusUsuario.Bloqueado)
+        {
+            return Unauthorized(new { mensagem = "Supervisor não encontrado ou bloqueado." });
+        }
+
+        if (usuario.Perfil is not (PerfilUsuario.Admin or PerfilUsuario.Gerente))
+        {
+            return Unauthorized(new { mensagem = "Acesso negado. Apenas gerentes ou administradores podem autorizar." });
+        }
+
+        if (!AuthService.SenhaValida(request.Senha, usuario.SenhaHash))
+        {
+            return Unauthorized(new { mensagem = "Senha incorreta." });
+        }
+
+        return Ok(new { autorizado = true, nome = usuario.Nome });
+    }
+
     private static bool SenhaForte(string senha)
     {
         return senha.Length >= 8

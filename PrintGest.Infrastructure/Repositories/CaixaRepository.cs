@@ -176,6 +176,72 @@ public sealed class CaixaRepository(PrintGestDbContext context) : ICaixaReposito
         return pagamento.Id;
     }
 
+    public async Task<bool> DeletarMovimentacaoAsync(string id, long usuarioId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return false;
+
+        if (id.StartsWith("PAG-", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!long.TryParse(id.Substring(4), out var pagamentoId)) return false;
+
+            var pagamento = await context.Pagamentos.FirstOrDefaultAsync(p => p.Id == pagamentoId, cancellationToken);
+            if (pagamento == null) return false;
+
+            var pedido = await context.Pedidos.FirstOrDefaultAsync(p => p.Id == pagamento.PedidoId, cancellationToken);
+            if (pedido != null)
+            {
+                if (pedido.Status == "CANCELADO")
+                {
+                    throw new InvalidOperationException("Não é possível remover pagamento de um pedido cancelado.");
+                }
+
+                var updatedPedido = pedido with
+                {
+                    ValorPago = Math.Max(0, pedido.ValorPago - pagamento.ValorTotal),
+                    SaldoDevedor = pedido.SaldoDevedor + pagamento.ValorTotal
+                };
+                context.Entry(pedido).CurrentValues.SetValues(updatedPedido);
+            }
+
+            context.Pagamentos.Remove(pagamento);
+
+            context.LogsSistema.Add(new LogSistema(
+                0,
+                usuarioId,
+                "Caixa",
+                pagamento.Id,
+                "EXCLUSAO",
+                $"Estorno/Exclusão do pagamento PAG-{pagamento.Id} de {pagamento.ValorTotal:C} do pedido #{pedido?.Numero ?? pagamento.PedidoId.ToString()}.",
+                DateTime.UtcNow
+            ));
+
+            return await context.SaveChangesAsync(cancellationToken) > 0;
+        }
+        else if (id.StartsWith("CX-", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!long.TryParse(id.Substring(3), out var movimentacaoId)) return false;
+
+            var movimentacao = await context.CaixaMovimentacoes.FirstOrDefaultAsync(m => m.Id == movimentacaoId, cancellationToken);
+            if (movimentacao == null) return false;
+
+            context.CaixaMovimentacoes.Remove(movimentacao);
+
+            context.LogsSistema.Add(new LogSistema(
+                0,
+                usuarioId,
+                "Caixa",
+                movimentacao.Id,
+                "EXCLUSAO",
+                $"Cancelamento da movimentação manual CX-{movimentacao.Id} ({movimentacao.Tipo}) de {movimentacao.Valor:C} — {movimentacao.Descricao}.",
+                DateTime.UtcNow
+            ));
+
+            return await context.SaveChangesAsync(cancellationToken) > 0;
+        }
+
+        return false;
+    }
+
     private static (DateTime Inicio, DateTime Fim) ResolverPeriodo(DateOnly? inicio, DateOnly? fim)
     {
         return (

@@ -5,6 +5,7 @@ public interface ICaixaRepository
     Task<CaixaResumoDto> ObterResumoAsync(DateOnly? inicio, DateOnly? fim, CancellationToken cancellationToken = default);
     Task<ResultadoPaginado<CaixaMovimentacaoDto>> ListarMovimentacoesAsync(DateOnly? inicio, DateOnly? fim, int pagina, int tamanhoPagina, CancellationToken cancellationToken = default);
     Task<long> CriarMovimentacaoAsync(CaixaMovimentacaoRequest request, CancellationToken cancellationToken = default);
+    Task<bool> DeletarMovimentacaoAsync(string id, long usuarioId, CancellationToken cancellationToken = default);
 }
 
 public sealed record CaixaResumoDto(
