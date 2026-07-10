@@ -47,6 +47,7 @@ public sealed class CaixaRepository(PrintGestDbContext context) : ICaixaReposito
                                   where p.RegistradoEm >= dtInicio && p.RegistradoEm <= dtFim
                                   select new {
                                       Id = "PAG-" + p.Id,
+                                      PedidoId = (long?)p.PedidoId,
                                       Tipo = "ENTRADA",
                                       FormaPagamento = p.FormaPagamento,
                                       Categoria = "Pedido",
@@ -63,6 +64,7 @@ public sealed class CaixaRepository(PrintGestDbContext context) : ICaixaReposito
                               where m.MovimentadoEm >= dtInicio && m.MovimentadoEm <= dtFim
                               select new {
                                   Id = "CX-" + m.Id,
+                                  PedidoId = (long?)null,
                                   Tipo = m.Tipo,
                                   FormaPagamento = m.FormaPagamento,
                                   Categoria = m.Categoria,
@@ -87,6 +89,7 @@ public sealed class CaixaRepository(PrintGestDbContext context) : ICaixaReposito
 
         var dtos = items.Select(x => new CaixaMovimentacaoDto(
             x.Id,
+            x.PedidoId,
             x.Tipo,
             x.FormaPagamento,
             x.Categoria,

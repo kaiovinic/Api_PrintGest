@@ -161,6 +161,24 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
             usuariosPagamento.TryGetValue(pg.RegistradoPorUsuarioId, out var nome) ? nome : "Desconhecido"
         )).OrderByDescending(pg => pg.RegistradoEm).ThenByDescending(pg => pg.Id).ToList();
 
+        string? formaPagamentoExibicao = pedido.FormaPagamento;
+        if (pedido.Pagamentos != null && pedido.Pagamentos.Any())
+        {
+            var formasUnicas = pedido.Pagamentos
+                .Select(p => p.FormaPagamento)
+                .Where(f => !string.IsNullOrWhiteSpace(f))
+                .Distinct()
+                .ToList();
+            if (formasUnicas.Count > 1)
+            {
+                formaPagamentoExibicao = string.Join(" e ", formasUnicas);
+            }
+            else if (formasUnicas.Count == 1)
+            {
+                formaPagamentoExibicao = formasUnicas[0];
+            }
+        }
+
         decimal valorRetido = Math.Max(pedido.ValorPago - pedido.ValorEstornado, 0);
 
         return new PedidoDetalhe(
@@ -179,7 +197,7 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
             pedido.DataPedido,
             pedido.DataEntrega,
             pedido.Vendedor,
-            pedido.FormaPagamento,
+            formaPagamentoExibicao,
             pedido.CondicaoPagamento,
             pedido.Frente,
             pedido.Fundo,
@@ -200,10 +218,14 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
     public async Task<long> CriarPedidoAsync(PedidoCadastroDto request, string tipo, string status, CancellationToken cancellationToken = default)
     {
         var total = request.Total;
-        var valorPago = request.ValorPago;
-        var saldoDevedor = total - valorPago;
+        var valorPago1 = request.ValorPago;
+        var valorPago2 = request.ValorPago2 ?? 0;
+        var totalValorPago = valorPago1 + valorPago2;
+        var saldoDevedor = total - totalValorPago;
 
         var clienteId = await SalvarOuAtualizarClienteAsync(request, cancellationToken);
+
+        string formaPagamentoSalvar = NormalizarFormaPagamento(request.FormaPagamento);
 
         var pedido = new Pedido(
             0,
@@ -215,7 +237,7 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
             request.DataPedido,
             request.DataEntrega,
             request.Vendedor?.Trim(),
-            NormalizarFormaPagamento(request.FormaPagamento),
+            formaPagamentoSalvar,
             NormalizarCondicaoPagamento(request.CondicaoPagamento),
             request.Frente?.Trim(),
             request.Fundo?.Trim(),
@@ -226,7 +248,7 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
             0,
             total,
             total,
-            valorPago,
+            totalValorPago,
             saldoDevedor,
             null,
             null, null, null, null
@@ -245,18 +267,35 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
             ));
         }
 
-        if (tipo == "PEDIDO" && valorPago > 0)
+        if (tipo == "PEDIDO")
         {
-            pedido.Pagamentos.Add(new Pagamento(
-                0,
-                0,
-                request.UsuarioId,
-                NormalizarFormaPagamento(request.FormaPagamento),
-                NormalizarCondicaoPagamento(request.CondicaoPagamento),
-                valorPago,
-                "Entrada registrada na criação do pedido",
-                DateTime.UtcNow
-            ));
+            if (valorPago1 > 0)
+            {
+                pedido.Pagamentos.Add(new Pagamento(
+                    0,
+                    0,
+                    request.UsuarioId,
+                    NormalizarFormaPagamento(request.FormaPagamento),
+                    NormalizarCondicaoPagamento(request.CondicaoPagamento),
+                    valorPago1,
+                    "Entrada registrada na criação do pedido",
+                    DateTime.UtcNow
+                ));
+            }
+
+            if (valorPago2 > 0 && !string.IsNullOrWhiteSpace(request.FormaPagamento2))
+            {
+                pedido.Pagamentos.Add(new Pagamento(
+                    0,
+                    0,
+                    request.UsuarioId,
+                    NormalizarFormaPagamento(request.FormaPagamento2),
+                    NormalizarCondicaoPagamento(request.CondicaoPagamento),
+                    valorPago2,
+                    "Entrada registrada na criação do pedido (segunda forma)",
+                    DateTime.UtcNow
+                ));
+            }
         }
 
         context.Pedidos.Add(pedido);
@@ -342,9 +381,14 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
         var eraOrcamento = existing.Tipo == "ORCAMENTO";
 
         var total = request.Total;
-        var saldoDevedor = total - request.ValorPago;
+        var valorPago1 = request.ValorPago;
+        var valorPago2 = request.ValorPago2 ?? 0;
+        var totalValorPago = valorPago1 + valorPago2;
+        var saldoDevedor = total - totalValorPago;
 
         var clienteId = await SalvarOuAtualizarClienteAsync(request, cancellationToken);
+
+        string formaPagamentoSalvar = NormalizarFormaPagamento(request.FormaPagamento);
 
         var updated = existing with
         {
@@ -355,14 +399,14 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
             DataPedido = request.DataPedido,
             DataEntrega = request.DataEntrega,
             Vendedor = request.Vendedor?.Trim(),
-            FormaPagamento = NormalizarFormaPagamento(request.FormaPagamento),
+            FormaPagamento = formaPagamentoSalvar,
             CondicaoPagamento = NormalizarCondicaoPagamento(request.CondicaoPagamento),
             Frente = request.Frente?.Trim(),
             Fundo = request.Fundo?.Trim(),
             Observacao = request.Observacao?.Trim(),
             Subtotal = total,
             Total = total,
-            ValorPago = request.ValorPago,
+            ValorPago = totalValorPago,
             SaldoDevedor = saldoDevedor
         };
 
@@ -384,18 +428,35 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
             ));
         }
 
-        if (eraOrcamento && request.ValorPago > 0)
+        if (eraOrcamento)
         {
-            context.Pagamentos.Add(new Pagamento(
-                0,
-                id,
-                request.UsuarioId,
-                NormalizarFormaPagamento(request.FormaPagamento),
-                NormalizarCondicaoPagamento(request.CondicaoPagamento),
-                request.ValorPago,
-                "Entrada registrada na criação do pedido",
-                DateTime.UtcNow
-            ));
+            if (valorPago1 > 0)
+            {
+                context.Pagamentos.Add(new Pagamento(
+                    0,
+                    id,
+                    request.UsuarioId,
+                    NormalizarFormaPagamento(request.FormaPagamento),
+                    NormalizarCondicaoPagamento(request.CondicaoPagamento),
+                    valorPago1,
+                    "Entrada registrada na criação do pedido",
+                    DateTime.UtcNow
+                ));
+            }
+
+            if (valorPago2 > 0 && !string.IsNullOrWhiteSpace(request.FormaPagamento2))
+            {
+                context.Pagamentos.Add(new Pagamento(
+                    0,
+                    id,
+                    request.UsuarioId,
+                    NormalizarFormaPagamento(request.FormaPagamento2),
+                    NormalizarCondicaoPagamento(request.CondicaoPagamento),
+                    valorPago2,
+                    "Entrada registrada na criação do pedido (segunda forma)",
+                    DateTime.UtcNow
+                ));
+            }
         }
 
         return await context.SaveChangesAsync(cancellationToken) > 0;
@@ -412,15 +473,19 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
         var novaForma = request.FormaPagamento;
         var novaCondicao = request.CondicaoPagamento;
         var entrada = request.ValorEntrada;
+        var entrada2 = request.ValorEntrada2 ?? 0;
+        var totalEntrada = entrada + entrada2;
+
+        string formaPagamentoSalvar = NormalizarFormaPagamento(novaForma);
 
         var updated = existing with
         {
             Tipo = "PEDIDO",
             Status = "ABERTO",
-            FormaPagamento = NormalizarFormaPagamento(novaForma),
+            FormaPagamento = formaPagamentoSalvar,
             CondicaoPagamento = NormalizarCondicaoPagamento(novaCondicao),
-            ValorPago = entrada,
-            SaldoDevedor = existing.Total - entrada
+            ValorPago = totalEntrada,
+            SaldoDevedor = existing.Total - totalEntrada
         };
 
         context.Entry(existing).CurrentValues.SetValues(updated);
@@ -438,6 +503,21 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
                 DateTime.UtcNow
             );
             context.Pagamentos.Add(pagamento);
+        }
+
+        if (entrada2 > 0 && !string.IsNullOrWhiteSpace(request.FormaPagamento2))
+        {
+            var pagamento2 = new Pagamento(
+                0,
+                id,
+                request.UsuarioId,
+                NormalizarFormaPagamento(request.FormaPagamento2),
+                NormalizarCondicaoPagamento(novaCondicao),
+                entrada2,
+                "Conversão de orçamento em pedido (segunda forma)",
+                DateTime.UtcNow
+            );
+            context.Pagamentos.Add(pagamento2);
         }
 
         return await context.SaveChangesAsync(cancellationToken) > 0;
@@ -562,7 +642,7 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
         return await context.SaveChangesAsync(cancellationToken) > 0;
     }
 
-    public async Task<(string Tipo, string Status, decimal ValorPago, decimal SaldoDevedor)?> ObterEstadoPedidoAsync(long id, CancellationToken cancellationToken = default)
+    public async Task<(string Tipo, string Status, decimal ValorPago, decimal SaldoDevedor, DateOnly? DataEntrega)?> ObterEstadoPedidoAsync(long id, CancellationToken cancellationToken = default)
     {
         var pedido = await context.Pedidos
             .AsNoTracking()
@@ -573,7 +653,7 @@ public sealed class PedidoRepository(PrintGestDbContext context) : IPedidoReposi
             return null;
         }
 
-        return (pedido.Tipo, pedido.Status, pedido.ValorPago, pedido.SaldoDevedor);
+        return (pedido.Tipo, pedido.Status, pedido.ValorPago, pedido.SaldoDevedor, pedido.DataEntrega);
     }
 
     private async Task<long> SalvarOuAtualizarClienteAsync(PedidoCadastroDto request, CancellationToken cancellationToken)

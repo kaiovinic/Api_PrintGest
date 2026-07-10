@@ -1,4 +1,4 @@
-﻿namespace PrintGest.Application.Abstractions;
+namespace PrintGest.Application.Abstractions;
 
 public interface ICaixaRepository
 {
@@ -18,6 +18,7 @@ public sealed record CaixaResumoDto(
 
 public sealed record CaixaMovimentacaoDto(
     string Id,
+    long? PedidoId,
     string Tipo,
     string FormaPagamento,
     string Categoria,

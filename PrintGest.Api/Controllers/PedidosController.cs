@@ -69,6 +69,15 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
     [HttpPost]
     public async Task<IActionResult> CriarPedido([FromBody] PedidoRequest request, CancellationToken cancellationToken)
     {
+        if (request.DataEntrega == null)
+        {
+            return BadRequest(new { mensagem = "A data de entrega é obrigatória para pedidos." });
+        }
+        if (request.DataEntrega < DateOnly.FromDateTime(DateTime.Today))
+        {
+            return BadRequest(new { mensagem = "A data de entrega não pode ser anterior à data atual." });
+        }
+
         await unitOfWork.BeginTransactionAsync(cancellationToken);
         try
         {
@@ -128,6 +137,15 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
     [HttpPut("{id:long}")]
     public async Task<IActionResult> EditarPedido(long id, [FromBody] PedidoRequest request, CancellationToken cancellationToken)
     {
+        if (request.DataEntrega == null)
+        {
+            return BadRequest(new { mensagem = "A data de entrega é obrigatória para pedidos." });
+        }
+        if (request.DataEntrega < DateOnly.FromDateTime(DateTime.Today))
+        {
+            return BadRequest(new { mensagem = "A data de entrega não pode ser anterior à data atual." });
+        }
+
         await unitOfWork.BeginTransactionAsync(cancellationToken);
         try
         {
@@ -156,11 +174,46 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
         await unitOfWork.BeginTransactionAsync(cancellationToken);
         try
         {
+            var estado = await pedidos.ObterEstadoPedidoAsync(id, cancellationToken);
+            if (estado is null)
+            {
+                await unitOfWork.RollbackAsync(cancellationToken);
+                return NotFound(new { mensagem = "Orçamento não encontrado." });
+            }
+
+            var (tipoAtual, statusAtual, _, _, dataEntrega) = estado.Value;
+
+            if (dataEntrega == null)
+            {
+                await unitOfWork.RollbackAsync(cancellationToken);
+                return BadRequest(new { mensagem = "Para converter em pedido, o orçamento deve ter uma data de entrega." });
+            }
+
+            if (dataEntrega < DateOnly.FromDateTime(DateTime.Today))
+            {
+                await unitOfWork.RollbackAsync(cancellationToken);
+                return BadRequest(new { mensagem = "A data de entrega do orçamento não pode ser anterior à data atual para conversão." });
+            }
+
+            if (request.ValorEntrada < 0 || (request.ValorEntrada2 ?? 0) < 0)
+            {
+                await unitOfWork.RollbackAsync(cancellationToken);
+                return BadRequest(new { mensagem = "Os valores de entrada não podem ser negativos." });
+            }
+
+            if (request.ValorEntrada + (request.ValorEntrada2 ?? 0) <= 0)
+            {
+                await unitOfWork.RollbackAsync(cancellationToken);
+                return BadRequest(new { mensagem = "Informe um valor de entrada maior que zero." });
+            }
+
             var dto = new ConverterPedidoDto(
                 request.UsuarioId,
                 request.FormaPagamento,
                 request.CondicaoPagamento,
-                request.ValorEntrada
+                request.ValorEntrada,
+                request.FormaPagamento2,
+                request.ValorEntrada2
             );
 
             var sucesso = await pedidos.ConverterEmPedidoAsync(id, dto, cancellationToken);
@@ -194,7 +247,7 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
                 return NotFound(new { mensagem = "Pedido ou orcamento nao encontrado." });
             }
 
-            var (tipoAtual, statusAtual, valorPago, _) = estado.Value;
+            var (tipoAtual, statusAtual, valorPago, _, _) = estado.Value;
 
             if (string.IsNullOrWhiteSpace(request.Observacao) || request.Observacao.Trim().Length < 10)
             {
@@ -347,12 +400,18 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
                 return NotFound(new { mensagem = "Pedido nao encontrado." });
             }
 
-            var (tipoAtual, statusAtual, _, saldoDevedor) = estado.Value;
+            var (tipoAtual, statusAtual, _, saldoDevedor, dataEntrega) = estado.Value;
 
             if (tipoAtual != "PEDIDO")
             {
                 await unitOfWork.RollbackAsync(cancellationToken);
                 return BadRequest(new { mensagem = "Somente pedidos podem ser finalizados. Orcamentos devem ser convertidos em pedido primeiro." });
+            }
+
+            if (dataEntrega == null)
+            {
+                await unitOfWork.RollbackAsync(cancellationToken);
+                return BadRequest(new { mensagem = "Não é permitido finalizar um pedido sem data de entrega." });
             }
 
             if (statusAtual == "CANCELADO")
@@ -448,7 +507,9 @@ public sealed class PedidosController(IPedidoRepository pedidos, IUnitOfWork uni
                 i.Quantidade,
                 i.ValorUnitario,
                 i.ValorTotal
-            )).ToList()
+            )).ToList(),
+            request.FormaPagamento2,
+            request.ValorPago2
         );
     }
 }
@@ -496,7 +557,10 @@ public sealed record PedidoRequest(
     decimal ValorPago,
     [Required(ErrorMessage = "Informe ao menos um item do pedido.")]
     [MinLength(1, ErrorMessage = "Informe ao menos um item do pedido.")]
-    IReadOnlyList<ItemPedidoRequest> Itens);
+    IReadOnlyList<ItemPedidoRequest> Itens,
+    [StringLength(30, ErrorMessage = "A segunda forma de pagamento deve ter no maximo 30 caracteres.")]
+    string? FormaPagamento2 = null,
+    decimal? ValorPago2 = null);
 
 public sealed record ItemPedidoRequest(
     [Required(ErrorMessage = "Informe a descricao do item.")]
@@ -518,8 +582,9 @@ public sealed record ConverterPedidoRequest(
     string FormaPagamento,
     [Required(ErrorMessage = "Informe a condicao de pagamento.")]
     string CondicaoPagamento,
-    [Range(0.01, double.MaxValue, ErrorMessage = "Informe um valor de entrada maior que zero.")]
-    decimal ValorEntrada);
+    decimal ValorEntrada,
+    string? FormaPagamento2 = null,
+    decimal? ValorEntrada2 = null);
 
 public sealed record AlterarStatusPedidoRequest(
     [Range(1, long.MaxValue, ErrorMessage = "Informe o usuario responsavel pela alteracao.")]

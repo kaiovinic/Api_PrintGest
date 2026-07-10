@@ -17,7 +17,7 @@ public interface IPedidoRepository
     Task<bool> FinalizarPedidoAsync(long id, FinalizarPedidoDto request, CancellationToken cancellationToken = default);
     
     // Método auxiliar caso precise validar o estado atual
-    Task<(string Tipo, string Status, decimal ValorPago, decimal SaldoDevedor)?> ObterEstadoPedidoAsync(long id, CancellationToken cancellationToken = default);
+    Task<(string Tipo, string Status, decimal ValorPago, decimal SaldoDevedor, DateOnly? DataEntrega)?> ObterEstadoPedidoAsync(long id, CancellationToken cancellationToken = default);
 }
 
 public sealed record PedidoFiltro(int? Ano, int? Mes, DateOnly? Inicio, DateOnly? Fim, string? Status, string? Atendente = null, int Pagina = 1, int TamanhoPagina = 10);
@@ -99,7 +99,9 @@ public record PedidoCadastroDto(
     string? OutrosItens,
     decimal Total,
     decimal ValorPago,
-    IReadOnlyList<ItemPedidoCadastroDto> Itens);
+    IReadOnlyList<ItemPedidoCadastroDto> Itens,
+    string? FormaPagamento2 = null,
+    decimal? ValorPago2 = null);
 
 public record ItemPedidoCadastroDto(
     string Descricao,
@@ -112,7 +114,9 @@ public record ConverterPedidoDto(
     long UsuarioId,
     string FormaPagamento,
     string CondicaoPagamento,
-    decimal ValorEntrada);
+    decimal ValorEntrada,
+    string? FormaPagamento2 = null,
+    decimal? ValorEntrada2 = null);
 
 public record AlterarStatusPedidoDto(
     long UsuarioId,
