@@ -107,7 +107,10 @@ app.UseSwaggerUI(c =>
     c.RoutePrefix = "api/swagger";
 });
 
-if (Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") != "true")
+// Em desenvolvimento o redirect para HTTPS quebra o app mobile: o emulador Android
+// não confia no certificado de dev do ASP.NET Core (SSLHandshakeException).
+if (!app.Environment.IsDevelopment()
+    && Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") != "true")
 {
     app.UseHttpsRedirection();
 }
